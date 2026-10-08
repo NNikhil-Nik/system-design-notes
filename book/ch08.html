@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 8 - Design a URL Shortener</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="8">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 8</div><h1>Design a URL Shortener</h1>
+    <p class="lead">A URL shortener turns a long, ugly web address into a tiny one like <code>https://tinyurl.com/y7keocwj</code>. When someone clicks the short link, they are sent on to the original page. It sounds simple, but designing one teaches you hashing, base 62 encoding, HTTP redirects, caching and how to handle a database with hundreds of billions of rows.</p>
+    <div class="meta"><span class="tag">~30 min read</span><span class="tag">Beginner</span><span class="tag">Prerequisites: Ch 1 (scaling basics), Ch 2 (estimation), Ch 7 (unique ID generator)</span></div></header>
+
+  <section><h2 id="the-big-picture">The big picture</h2>
+    <p>Long URLs are hard to share. They break across lines in emails, they do not fit in a text message, and nobody can remember them. A URL shortener solves this with two jobs:</p>
+    <ol class="steps">
+      <li><strong>Shortening.</strong> You give it a long URL. It gives you back a short alias (a short URL).</li>
+      <li><strong>Redirecting.</strong> When anyone visits the short URL, the service looks up the long URL and tells the browser to go there.</li>
+    </ol>
+    <p>That is the whole product. The interesting part is doing it for <strong>100 million new URLs every day</strong>, keeping the short part as short as possible, and answering every click quickly.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Think of a coat check at a theatre. You hand over a big, bulky coat (the long URL) and get back a small numbered ticket (the short URL). Later, anyone holding that ticket can walk up to the counter, and the attendant looks up the number and hands back the coat (the redirect). The ticket is tiny, but it reliably points at something big. The coat check needs two things to work: a way to hand out <em>unique</em> ticket numbers, and a fast way to find a coat given a number. This chapter is about exactly those two things.</p>
+    </div>
+    <div class="cards">
+      <div class="card sky"><h4>Why interviewers love it</h4><p>The scope is small enough to finish in 45 minutes, yet it touches estimation, API design, HTTP, hashing, databases and caching.</p></div>
+      <div class="card green"><h4>What you will learn</h4><p>How 301/302 redirects work, how to pick a short-code length with math, two ways to generate codes (hash vs base 62), and how to scale reads with a cache.</p></div>
+      <div class="card yellow"><h4>Key insight</h4><p>Reads outnumber writes 10 to 1. Almost every design decision is about making the redirect (read) path fast.</p></div>
+    </div>
+  </section>
+
+  <section><h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>URL</dt><dd>Uniform Resource Locator, a web address such as <code>https://www.example.com/page</code>.</dd>
+      <dt>Long URL</dt><dd>The original address a user wants to shorten.</dd>
+      <dt>Short URL / alias</dt><dd>The compact address the service hands back, e.g. <code>https://tinyurl.com/zn9edcu</code>.</dd>
+      <dt>Hash value / short code</dt><dd>The few characters after the domain (<code>zn9edcu</code>) that identify one long URL.</dd>
+      <dt>Hash function</dt><dd>A function that turns any input (like a long URL) into a fixed-size output. The same input always gives the same output.</dd>
+      <dt>Collision</dt><dd>When two different inputs produce the same hash output. Two long URLs would then fight over one short code.</dd>
+      <dt>CRC32, MD5, SHA-1</dt><dd>Well-known hash functions. CRC32 outputs 8 hex characters, MD5 outputs 32, SHA-1 outputs 40.</dd>
+      <dt>Base 62</dt><dd>A way of writing numbers using 62 symbols (0-9, a-z, A-Z) instead of the usual 10 digits. Bigger base means shorter strings.</dd>
+      <dt>HTTP redirect</dt><dd>A server response telling the browser "the thing you want is somewhere else; go here instead".</dd>
+      <dt>301 Moved Permanently</dt><dd>A redirect status meaning the move is permanent. Browsers cache it and stop asking the shortener.</dd>
+      <dt>302 Found</dt><dd>A redirect status meaning the move is temporary. Browsers keep asking the shortener every time.</dd>
+      <dt>Location header</dt><dd>The part of a redirect response that contains the address the browser should go to.</dd>
+      <dt>API endpoint</dt><dd>A URL on the server that clients call to perform an action, like <code>POST api/v1/data/shorten</code>.</dd>
+      <dt>REST</dt><dd>A common style for web APIs where you use HTTP verbs (GET, POST) on resource URLs.</dd>
+      <dt>QPS</dt><dd>Queries per second, how many requests the system handles each second.</dd>
+      <dt>Bloom filter</dt><dd>A compact, space-efficient data structure that answers "is X definitely not in the set, or maybe in it?". Fast, but can give false positives.</dd>
+      <dt>Cache</dt><dd>Fast memory storage (e.g. Redis, Memcached) that keeps popular data so you avoid slow database lookups.</dd>
+      <dt>Load balancer</dt><dd>A machine that spreads incoming requests across many web servers.</dd>
+      <dt>Stateless web tier</dt><dd>Web servers that keep no user data locally, so you can add or remove them freely.</dd>
+      <dt>Replication</dt><dd>Keeping copies of a database on several machines for safety and read speed.</dd>
+      <dt>Sharding</dt><dd>Splitting one big database into smaller pieces (shards), each holding part of the data.</dd>
+      <dt>Rate limiter</dt><dd>A component that blocks clients sending too many requests (Chapter 4).</dd>
+      <dt>Unique ID generator</dt><dd>A service that hands out globally unique numbers, e.g. Twitter Snowflake (Chapter 7).</dd>
+    </dl>
+  </section>
+
+  <section><h2 id="step1-requirements">Step 1 - Understand the problem and establish scope</h2>
+    <p>System design questions are deliberately vague. Before drawing anything, you ask questions to pin down what you are building. The book shows this conversation between the candidate and interviewer:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th><th>Why it matters</th></tr>
+      <tr><td>Can you give an example of how a URL shortener works?</td><td><code>https://www.systeminterview.com/q=chatsystem&amp;c=loggedin&amp;v=v3&amp;l=long</code> becomes <code>https://tinyurl.com/y7keocwj</code>. Clicking the alias redirects to the original.</td><td>Confirms the two core features: shorten and redirect.</td></tr>
+      <tr><td>What is the traffic volume?</td><td>100 million URLs generated per day.</td><td>Drives every number in the estimate.</td></tr>
+      <tr><td>How long is the shortened URL?</td><td>As short as possible.</td><td>We will calculate the minimum length.</td></tr>
+      <tr><td>What characters are allowed?</td><td>Numbers (0-9) and characters (a-z, A-Z).</td><td>That is 10 + 26 + 26 = <strong>62</strong> possible characters.</td></tr>
+      <tr><td>Can shortened URLs be deleted or updated?</td><td>For simplicity, no.</td><td>Data is write-once; we never have to handle edits.</td></tr>
+    </table></div>
+    <h3>Basic use cases</h3>
+    <ol class="steps">
+      <li><strong>URL shortening</strong> - given a long URL, return a much shorter URL.</li>
+      <li><strong>URL redirecting</strong> - given a short URL, redirect to the original URL.</li>
+      <li><strong>High availability, scalability and fault tolerance</strong> - the usual non-functional goals.</li>
+    </ol>
+
+    <h3>Back-of-the-envelope estimation</h3>
+    <p>"Back-of-the-envelope" means rough math you could do on scrap paper. The goal is not precision; it is to know the <em>scale</em> so you pick sensible technology. Let us do it one step at a time.</p>
+    <ol class="steps">
+      <li><strong>Write operations per day.</strong> Given: 100 million URLs are shortened per day.</li>
+      <li><strong>Writes per second.</strong> A day has 24 x 3600 = 86,400 seconds. 100,000,000 / 86,400 = about <strong>1,160 writes per second</strong>. (The exact result is 1,157; the book rounds to 1,160.)</li>
+      <li><strong>Reads per second.</strong> Assume the read-to-write ratio is 10:1, meaning each short URL is clicked about 10 times for every time one is created. 1,160 x 10 = <strong>11,600 reads per second</strong>.</li>
+      <li><strong>Total records over 10 years.</strong> Assume the service runs for 10 years. 100 million x 365 days x 10 years = <strong>365 billion records</strong>.</li>
+      <li><strong>Storage.</strong> Assume an average URL is 100 bytes long. 365 billion x 100 bytes = 36.5 trillion bytes, which is <strong>365 TB</strong>.</li>
+    </ol>
+    <div class="callout info"><div class="callout-title">Checking the storage unit</div>
+      <p>The book writes the storage as 365 billion x 100 bytes x 10 years = 365 TB. Note that the "10 years" is already inside the 365 billion figure, so the clean computation is 365 x 10<sup>9</sup> x 100 bytes = 3.65 x 10<sup>13</sup> bytes, roughly 36.5 TB. The book's 365 TB is a deliberately generous (rounded-up) figure. In an interview, show your working and say which one you mean; the point is "tens to hundreds of terabytes - far too big for one machine's memory".</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>100M</b><span>new URLs / day</span></div>
+      <div class="stat"><b>~1,160</b><span>writes / sec</span></div>
+      <div class="stat"><b>~11,600</b><span>reads / sec</span></div>
+      <div class="stat"><b>365B</b><span>records in 10 years</span></div>
+      <div class="stat"><b>365 TB</b><span>storage (book figure)</span></div>
+    </div>
+    <div class="callout key"><div class="callout-title">What the numbers tell us</div>
+      <p>365 billion records will not fit in memory, so we need a real database. 11,600 reads per second is much larger than 1,160 writes per second, so the read path (redirecting) deserves a cache. And 365 billion distinct codes tells us how long the short code must be.</p>
+    </div>
+  </section>
+
+  <section><h2 id="step2-high-level">Step 2 - High-level design</h2>
+    <p>We will look at three things: the API endpoints, how redirecting works, and how shortening works.</p>
+
+    <h3>API endpoints</h3>
+    <p>An API endpoint is the "door" that clients knock on. We follow REST style and need just two:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Purpose</th><th>Request</th><th>Parameters</th><th>Returns</th></tr>
+      <tr><td>Shorten a URL</td><td><code>POST api/v1/data/shorten</code></td><td>Request body: <code>{longUrl: longURLString}</code></td><td>The <code>shortURL</code></td></tr>
+      <tr><td>Redirect</td><td><code>GET api/v1/shortUrl</code></td><td>The short URL in the path</td><td>The <code>longURL</code> for HTTP redirection</td></tr>
+    </table></div>
+    <p>We use <code>POST</code> for shortening because it <em>creates</em> something new on the server. We use <code>GET</code> for redirecting because it only <em>reads</em>.</p>
+<pre><code>POST /api/v1/data/shorten
+Content-Type: application/json
+
+{ "longUrl": "https://en.wikipedia.org/wiki/Systems_design" }
+
+--- response ---
+200 OK
+{ "shortUrl": "https://tinyurl.com/zn9edcu" }</code></pre>
+
+    <h3>URL redirecting</h3>
+    <p>When you type a tinyurl link into a browser, here is what happens. The shortener server does not send you the page. Instead, it sends back a tiny response saying "go over there", with the long URL in the <code>Location</code> header. The browser then makes a second request to the real site.</p>
+    <div class="diagram"><div class="diagram-title">The redirect exchange</div>
+      <svg class="dg" viewBox="0 0 760 330">
+        <defs><marker id="c8m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="40" y="20" width="140" height="44" rx="8" class="a"/><text x="110" y="47" text-anchor="middle">Browser</text>
+        <rect x="310" y="20" width="160" height="44" rx="8" class="g"/><text x="390" y="47" text-anchor="middle">tinyurl server</text>
+        <rect x="580" y="20" width="150" height="44" rx="8" class="s"/><text x="655" y="47" text-anchor="middle">Long URL site</text>
+        <line x1="110" y1="64" x2="110" y2="310" stroke-dasharray="4 4"/>
+        <line x1="390" y1="64" x2="390" y2="310" stroke-dasharray="4 4"/>
+        <line x1="655" y1="64" x2="655" y2="310" stroke-dasharray="4 4"/>
+        <line x1="112" y1="100" x2="386" y2="100" marker-end="url(#c8m1)"/>
+        <text x="250" y="92" text-anchor="middle">1. GET tinyurl.com/zn9edcu</text>
+        <line x1="388" y1="160" x2="114" y2="160" marker-end="url(#c8m1)" class="g"/>
+        <text x="250" y="140" text-anchor="middle" class="g">2. 301 or 302 redirect</text>
+        <text x="250" y="178" text-anchor="middle" class="sm">Location: https://en.wikipedia.org/...</text>
+        <line x1="112" y1="230" x2="651" y2="230" marker-end="url(#c8m1)"/>
+        <text x="390" y="222" text-anchor="middle">3. GET https://en.wikipedia.org/wiki/Systems_design</text>
+        <line x1="651" y1="285" x2="114" y2="285" marker-end="url(#c8m1)" class="s"/>
+        <text x="390" y="277" text-anchor="middle" class="s">4. 200 OK + the actual page</text>
+      </svg>
+      <div class="diagram-caption">The shortener only answers step 2. It returns a status code (301 or 302) and a Location header. The browser follows the Location header on its own.</div>
+    </div>
+
+    <h3>301 vs 302: which redirect to use?</h3>
+    <p>Both codes redirect the user, but they differ in one important way: <strong>does the browser remember the answer?</strong></p>
+    <div class="cards">
+      <div class="card purple"><h4>301 Moved Permanently</h4><p>"This URL has moved for good." The browser <strong>caches</strong> the response. The next time the user clicks the same short URL, the browser goes straight to the long URL and never contacts the shortener again.</p></div>
+      <div class="card teal"><h4>302 Found</h4><p>"This URL has moved temporarily." The browser does <strong>not</strong> cache it. Every click goes back to the shortener first, which then redirects again.</p></div>
+    </div>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th></th><th>301 (permanent)</th><th>302 (temporary)</th></tr>
+      <tr><td>Browser caches it?</td><td>Yes</td><td>No</td></tr>
+      <tr><td>Load on the shortener</td><td>Lower - repeat clicks skip us</td><td>Higher - every click hits us</td></tr>
+      <tr><td>Click tracking / analytics</td><td>Poor - we miss repeat clicks</td><td>Accurate - we see every click</td></tr>
+      <tr><td>Choose it when</td><td>Priority is reducing server load</td><td>Analytics are important (click rate, source of clicks)</td></tr>
+    </table></div>
+    <div class="callout tip"><div class="callout-title">Interview tip</div><p>There is no single "right" answer. Say: "If the goal is to reduce server load, I would pick 301. If analytics such as click rate and source tracking matter, I would pick 302." Stating the trade-off is what earns credit.</p></div>
+    <p>The simplest way to implement redirecting is with a hash table that stores <code>&lt;shortURL, longURL&gt;</code> pairs:</p>
+    <ol class="steps">
+      <li><strong>Get longURL:</strong> <code>longURL = hashTable.get(shortURL)</code></li>
+      <li><strong>Redirect:</strong> once you have the longURL, perform the URL redirect.</li>
+    </ol>
+
+    <h3>URL shortening</h3>
+    <p>Suppose the short URL looks like <code>www.tinyurl.com/{hashValue}</code>. To support shortening, we need a hash function <code>fx</code> that maps a long URL to the <code>hashValue</code>.</p>
+    <div class="diagram"><div class="diagram-title">The hash function idea</div>
+      <div class="flow">
+        <div class="node accent">longURL<small>https://en.wikipedia.org/wiki/Systems_design</small></div>
+        <div class="arrow">→<small>hash function fx</small></div>
+        <div class="node green">hashValue<small>e.g. 5cb5405</small></div>
+      </div>
+      <div class="diagram-caption">The function must satisfy two rules: each longURL maps to exactly one hashValue, and each hashValue can be mapped back to its longURL.</div>
+    </div>
+    <p>The requirements for the hash function are:</p>
+    <ul>
+      <li>Each <code>longURL</code> must be hashed to one <code>hashValue</code>.</li>
+      <li>Each <code>hashValue</code> can be mapped back to the <code>longURL</code>.</li>
+    </ul>
+    <p>How to actually build that function is the main topic of the deep dive.</p>
+  </section>
+
+  <section><h2 id="data-model">Step 3 - Deep dive: data model</h2>
+    <p>In the high-level design, everything lived in a hash table. A hash table in memory is a great starting point, but it fails in real life for two reasons:</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>In-memory hash table: good</h4><ul><li>Very simple to code</li><li>Extremely fast lookups</li></ul></div>
+      <div class="cons"><h4>In-memory hash table: bad</h4><ul><li>Memory is limited and expensive - hundreds of TB will not fit</li><li>If the server restarts, everything in memory is lost</li></ul></div>
+    </div>
+    <p>The better option is to store the <code>&lt;shortURL, longURL&gt;</code> mapping in a <strong>relational database</strong>. The table is simple, with three columns:</p>
+    <div class="diagram"><div class="diagram-title">The url table</div>
+      <svg class="dg" viewBox="0 0 560 200">
+        <rect x="150" y="15" width="260" height="44" rx="8" class="a"/><text x="280" y="42" text-anchor="middle" class="a">url</text>
+        <rect x="150" y="59" width="260" height="40" rx="0"/><text x="170" y="84">id</text><text x="390" y="84" text-anchor="end" class="sm">PK, unique number</text>
+        <rect x="150" y="99" width="260" height="40" rx="0"/><text x="170" y="124">shortURL</text><text x="390" y="124" text-anchor="end" class="sm">e.g. zn9edcu</text>
+        <rect x="150" y="139" width="260" height="40" rx="0"/><text x="170" y="164">longURL</text><text x="390" y="164" text-anchor="end" class="sm">original address</text>
+      </svg>
+      <div class="diagram-caption">One row per shortened URL. "PK" means primary key: a column whose value uniquely identifies the row. In the base 62 approach, shortURL is derived from id.</div>
+    </div>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>id</th><th>shortURL</th><th>longURL</th></tr>
+      <tr><td>2009215674938</td><td>zn9edcu</td><td>https://en.wikipedia.org/wiki/Systems_design</td></tr>
+      <tr><td>11157</td><td>2TX</td><td>https://www.example.com/some/long/path</td></tr>
+    </table></div>
+  </section>
+
+  <section><h2 id="hash-length">Hash value length</h2>
+    <p>The <code>hashValue</code> is made of characters from <code>[0-9, a-z, A-Z]</code>: 10 + 26 + 26 = <strong>62 possible characters</strong>. How long must it be?</p>
+    <p>Think about it like a combination lock. A lock with 1 dial of 10 digits has 10 combinations. 2 dials give 10 x 10 = 100. With <em>n</em> dials and 62 symbols per dial, there are <strong>62<sup>n</sup></strong> combinations. We need enough combinations to give every one of our 365 billion URLs its own code. So we find the smallest <em>n</em> such that <strong>62<sup>n</sup> &ge; 365 billion</strong>.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>n (length)</th><th>Maximum number of URLs (62<sup>n</sup>)</th><th>Enough for 365 billion?</th></tr>
+      <tr><td>1</td><td>62</td><td>No</td></tr>
+      <tr><td>2</td><td>3,844</td><td>No</td></tr>
+      <tr><td>3</td><td>238,328</td><td>No</td></tr>
+      <tr><td>4</td><td>14,776,336</td><td>No</td></tr>
+      <tr><td>5</td><td>916,132,832</td><td>No</td></tr>
+      <tr><td>6</td><td>56,800,235,584 (~56.8 billion)</td><td>No</td></tr>
+      <tr><td><strong>7</strong></td><td><strong>3,521,614,606,208 (~3.5 trillion)</strong></td><td><strong>Yes</strong></td></tr>
+      <tr><td>8</td><td>218,340,105,584,896</td><td>Yes (more than needed)</td></tr>
+    </table></div>
+    <div class="callout key"><div class="callout-title">Answer: 7 characters</div>
+      <p>With n = 6 we can only make about 56.8 billion codes, which is not enough. With n = 7 we can make about 3.5 trillion, comfortably above 365 billion. So the hashValue length is <strong>7</strong>.</p>
+    </div>
+    <p>Now we look at two ways to produce that 7-character value: <strong>hash + collision resolution</strong>, and <strong>base 62 conversion</strong>.</p>
+  </section>
+
+  <section><h2 id="hash-collision">Approach 1: hash + collision resolution</h2>
+    <p>The first idea is to use a well-known hash function. Here is what three of them output for the same input, <code>https://en.wikipedia.org/wiki/Systems_design</code>:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Hash function</th><th>Hash value (hexadecimal)</th><th>Length</th></tr>
+      <tr><td>CRC32</td><td><code>5cb54054</code></td><td>8 chars</td></tr>
+      <tr><td>MD5</td><td><code>5a62509a84df9ee03fe1230b9df8b84e</code></td><td>32 chars</td></tr>
+      <tr><td>SHA-1</td><td><code>0eeae7916c06853901d9ccbefbfcaf4de57ed85b</code></td><td>40 chars</td></tr>
+    </table></div>
+    <p>Even the shortest one, CRC32, is longer than 7 characters. The obvious fix is to <strong>take the first 7 characters</strong> (for CRC32: <code>5cb5405</code>). But chopping a hash makes collisions more likely: two different long URLs might start with the same 7 characters.</p>
+    <h3>Resolving collisions</h3>
+    <p>When a collision happens, we <strong>append a new predefined string</strong> to the long URL and hash again, repeating until there is no collision.</p>
+    <div class="diagram"><div class="diagram-title">Hash + collision resolution flow</div>
+      <svg class="dg" viewBox="0 0 760 330">
+        <defs><marker id="c8m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="30" width="120" height="44" rx="8" class="a"/><text x="80" y="57" text-anchor="middle">input longURL</text>
+        <rect x="190" y="30" width="110" height="44" rx="8"/><text x="245" y="57" text-anchor="middle">hash</text>
+        <rect x="350" y="30" width="150" height="44" rx="8"/><text x="425" y="57" text-anchor="middle">shortURL (7 chars)</text>
+        <path d="M630,22 L700,52 L630,82 L560,52 Z" class="y"/><text x="630" y="49" text-anchor="middle">exist</text><text x="630" y="64" text-anchor="middle">in DB?</text>
+        <line x1="140" y1="52" x2="188" y2="52" marker-end="url(#c8m2)"/>
+        <line x1="300" y1="52" x2="348" y2="52" marker-end="url(#c8m2)"/>
+        <line x1="500" y1="52" x2="558" y2="52" marker-end="url(#c8m2)"/>
+        <line x1="630" y1="82" x2="630" y2="190" marker-end="url(#c8m2)" class="g"/>
+        <text x="650" y="140" class="g">no</text>
+        <rect x="560" y="192" width="140" height="44" rx="8" class="g"/><text x="630" y="219" text-anchor="middle">save to DB</text>
+        <line x1="630" y1="236" x2="630" y2="290" marker-end="url(#c8m2)"/>
+        <rect x="580" y="290" width="100" height="34" rx="8"/><text x="630" y="312" text-anchor="middle">end</text>
+        <path d="M600,72 L600,150 L245,150 L245,140" class="r"/>
+        <text x="420" y="168" text-anchor="middle" class="r">yes (collision)</text>
+        <rect x="150" y="96" width="190" height="44" rx="8" class="r"/><text x="245" y="116" text-anchor="middle">longURL +</text><text x="245" y="132" text-anchor="middle" class="sm">predefined string</text>
+        <line x1="245" y1="96" x2="245" y2="76" marker-end="url(#c8m2)" class="r"/>
+      </svg>
+      <div class="diagram-caption">Hash, cut to 7 characters, check the database. If the code is already taken, add a predefined string to the long URL and hash again. If it is free, save it.</div>
+    </div>
+    <p><strong>Worked example.</strong> Hash <code>https://en.wikipedia.org/wiki/Systems_design</code> with CRC32, take <code>5cb5405</code>. Suppose that code already belongs to another URL. We append a predefined string (call it <code>X</code>) to get <code>https://en.wikipedia.org/wiki/Systems_designX</code>, hash that, take the first 7 characters, and check again. Because the input changed, the output is completely different, and it is very likely free.</p>
+    <h3>The cost: a database lookup per write - and the Bloom filter fix</h3>
+    <p>This method removes collisions, but it is <strong>expensive</strong>: every time we create a short URL we must query the database to check whether the code already exists. A <strong>Bloom filter</strong> can speed this up.</p>
+    <div class="callout info"><div class="callout-title">What is a Bloom filter?</div>
+      <p>A Bloom filter is a long row of bits (all 0 at first) plus a few hash functions. To <em>add</em> an item, you hash it with each function and set those bit positions to 1. To <em>check</em> an item, you hash it again and look at those positions. If any bit is 0, the item is <strong>definitely not</strong> in the set. If all are 1, it is <strong>probably</strong> in the set (it might be a false positive). It uses far less memory than storing the actual items, so it fits in RAM. For the shortener: if the Bloom filter says "definitely not seen", we skip the database check entirely.</p>
+    </div>
+    <div class="diagram"><div class="diagram-title">Bloom filter in a nutshell</div>
+      <svg class="dg" viewBox="0 0 720 190">
+        <defs><marker id="c8m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="270" y="10" width="180" height="36" rx="8" class="a"/><text x="360" y="33" text-anchor="middle">"5cb5405"</text>
+        <g>
+          <rect x="120" y="120" width="40" height="36" rx="4"/><text x="140" y="143" text-anchor="middle">0</text>
+          <rect x="160" y="120" width="40" height="36" rx="4" class="g"/><text x="180" y="143" text-anchor="middle" class="g">1</text>
+          <rect x="200" y="120" width="40" height="36" rx="4"/><text x="220" y="143" text-anchor="middle">0</text>
+          <rect x="240" y="120" width="40" height="36" rx="4"/><text x="260" y="143" text-anchor="middle">0</text>
+          <rect x="280" y="120" width="40" height="36" rx="4"/><text x="300" y="143" text-anchor="middle">0</text>
+          <rect x="320" y="120" width="40" height="36" rx="4" class="g"/><text x="340" y="143" text-anchor="middle" class="g">1</text>
+          <rect x="360" y="120" width="40" height="36" rx="4"/><text x="380" y="143" text-anchor="middle">0</text>
+          <rect x="400" y="120" width="40" height="36" rx="4"/><text x="420" y="143" text-anchor="middle">0</text>
+          <rect x="440" y="120" width="40" height="36" rx="4"/><text x="460" y="143" text-anchor="middle">0</text>
+          <rect x="480" y="120" width="40" height="36" rx="4" class="g"/><text x="500" y="143" text-anchor="middle" class="g">1</text>
+          <rect x="520" y="120" width="40" height="36" rx="4"/><text x="540" y="143" text-anchor="middle">0</text>
+          <rect x="560" y="120" width="40" height="36" rx="4"/><text x="580" y="143" text-anchor="middle">0</text>
+        </g>
+        <line x1="330" y1="46" x2="184" y2="116" marker-end="url(#c8m3)"/><text x="230" y="80" class="sm">h1</text>
+        <line x1="355" y1="46" x2="340" y2="116" marker-end="url(#c8m3)"/><text x="355" y="90" class="sm">h2</text>
+        <line x1="390" y1="46" x2="496" y2="116" marker-end="url(#c8m3)"/><text x="455" y="80" class="sm">h3</text>
+        <text x="360" y="180" text-anchor="middle" class="sm">Three hash functions set three bits. Lookup checks the same three bits.</text>
+      </svg>
+      <div class="diagram-caption">Any 0 among the checked bits means "definitely new". All 1s means "maybe exists - go confirm with the database".</div>
+    </div>
+  </section>
+
+  <section><h2 id="base62">Approach 2: base 62 conversion</h2>
+    <p><strong>Base conversion</strong> means writing the same number using a different set of digits. We normally count in base 10 (digits 0-9). Computers also use base 2 (0-1) and base 16 (0-9, a-f). Base 62 uses 62 symbols, so each character carries more information and the string gets shorter.</p>
+    <p>The idea: give every URL a unique <strong>number</strong> (its id) first, then write that number in base 62. That base 62 string is the short code. Since ids are unique, codes are unique - <strong>no collisions possible</strong>.</p>
+    <h3>The base 62 alphabet</h3>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Value</th><th>0 ... 9</th><th>10 ... 35</th><th>36 ... 61</th></tr>
+      <tr><td>Character</td><td><code>0</code> ... <code>9</code></td><td><code>a</code> ... <code>z</code></td><td><code>A</code> ... <code>Z</code></td></tr>
+    </table></div>
+    <p>So 0 = '0', 9 = '9', 10 = 'a', 35 = 'z', 36 = 'A', and 61 = 'Z'.</p>
+    <h3>Worked example: convert 11157 to base 62</h3>
+    <p>Convert by repeatedly dividing by 62 and keeping the remainders - exactly how you would convert a number to binary, but dividing by 62 instead of 2.</p>
+    <ol class="steps">
+      <li><strong>11157 / 62</strong> = 179, remainder <strong>59</strong>. Check: 179 x 62 = 11098, and 11157 - 11098 = 59. Value 59 maps to <code>X</code> (36 = A, so 59 = A + 23 = X).</li>
+      <li><strong>179 / 62</strong> = 2, remainder <strong>55</strong>. Check: 2 x 62 = 124, 179 - 124 = 55. Value 55 maps to <code>T</code> (36 + 19).</li>
+      <li><strong>2 / 62</strong> = 0, remainder <strong>2</strong>. Value 2 maps to <code>2</code>. The quotient is now 0, so we stop.</li>
+      <li><strong>Read the remainders bottom to top:</strong> 2, 55, 59 &rarr; <code>2</code> <code>T</code> <code>X</code> = <strong>"2TX"</strong>.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Repeated division by 62</div>
+      <svg class="dg" viewBox="0 0 680 230">
+        <defs><marker id="c8m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <text x="60" y="40" text-anchor="middle" class="sm">base</text><text x="200" y="40" text-anchor="middle" class="sm">number</text><text x="360" y="40" text-anchor="middle" class="sm">remainder</text><text x="500" y="40" text-anchor="middle" class="sm">character</text>
+        <text x="60" y="80" text-anchor="middle">62</text><rect x="140" y="58" width="120" height="34" rx="6"/><text x="200" y="80" text-anchor="middle">11157</text><text x="360" y="80" text-anchor="middle" class="y">59</text><text x="500" y="80" text-anchor="middle" class="g">X</text>
+        <text x="60" y="130" text-anchor="middle">62</text><rect x="140" y="108" width="120" height="34" rx="6"/><text x="200" y="130" text-anchor="middle">179</text><text x="360" y="130" text-anchor="middle" class="y">55</text><text x="500" y="130" text-anchor="middle" class="g">T</text>
+        <text x="60" y="180" text-anchor="middle">62</text><rect x="140" y="158" width="120" height="34" rx="6"/><text x="200" y="180" text-anchor="middle">2</text><text x="360" y="180" text-anchor="middle" class="y">2</text><text x="500" y="180" text-anchor="middle" class="g">2</text>
+        <text x="200" y="218" text-anchor="middle" class="sm">0 (stop)</text>
+        <line x1="580" y1="185" x2="580" y2="70" marker-end="url(#c8m4)" class="a"/>
+        <text x="600" y="130" class="a">read up</text>
+      </svg>
+      <div class="diagram-caption">Read the characters from the bottom up: 11157 in base 10 = "2TX" in base 62. The short URL becomes https://tinyurl.com/2TX.</div>
+    </div>
+    <p>To go back, multiply out: 2 x 62<sup>2</sup> + 55 x 62<sup>1</sup> + 59 x 62<sup>0</sup> = 7688 + 3410 + 59 = <strong>11157</strong>.</p>
+    <h3>Pseudocode</h3>
+<pre><code>ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+function encode(id):              # number -> short code
+    if id == 0: return "0"
+    s = ""
+    while id &gt; 0:
+        s = ALPHABET[id % 62] + s  # prepend the remainder's character
+        id = id / 62               # integer division
+    return s
+
+function decode(code):            # short code -> number
+    id = 0
+    for ch in code:
+        id = id * 62 + ALPHABET.indexOf(ch)
+    return id
+
+encode(11157)  # "2TX"
+decode("2TX")  # 11157</code></pre>
+  </section>
+
+  <section><h2 id="compare">Comparing the two approaches</h2>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Hash + collision resolution</th><th>Base 62 conversion</th></tr>
+      <tr><td>Fixed short URL length (always 7 characters).</td><td>Short URL length is not fixed; it grows with the ID (11157 gives 3 chars, a big ID gives 7).</td></tr>
+      <tr><td>Does not need a unique ID generator.</td><td>Depends on a unique ID generator (Chapter 7).</td></tr>
+      <tr><td>Collisions are possible and must be resolved.</td><td>Collision is not possible because the ID is unique.</td></tr>
+      <tr><td>Not possible to figure out the next short URL, because it does not depend on an ID.</td><td>Easy to figure out the next short URL if IDs increase by 1 for each new entry. This can be a <strong>security concern</strong>.</td></tr>
+    </table></div>
+    <div class="callout warn"><div class="callout-title">Why "guessable" matters</div>
+      <p>If ids go 11157, 11158, 11159..., the codes go 2TX, 2TY, 2TZ... Anyone can enumerate them and visit every link people have shortened, including private ones. In an interview, mention this and suggest a mitigation such as non-sequential IDs.</p>
+    </div>
+    <p>The book uses <strong>base 62 conversion</strong> in its design.</p>
+  </section>
+
+  <section><h2 id="shortening-flow">URL shortening deep dive</h2>
+    <p>As one of the core parts of the system, the shortening flow should be logically simple and functional. Here is the flow using base 62:</p>
+    <div class="diagram"><div class="diagram-title">URL shortening flow</div>
+      <svg class="dg" viewBox="0 0 760 360">
+        <defs><marker id="c8m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="30" y="30" width="150" height="44" rx="8" class="a"/><text x="105" y="57" text-anchor="middle">1. input longURL</text>
+        <path d="M330,12 L420,52 L330,92 L240,52 Z" class="y"/><text x="330" y="48" text-anchor="middle">2. longURL</text><text x="330" y="64" text-anchor="middle">in DB?</text>
+        <rect x="500" y="30" width="230" height="44" rx="8" class="s"/><text x="615" y="57" text-anchor="middle">return existing shortURL</text>
+        <line x1="180" y1="52" x2="238" y2="52" marker-end="url(#c8m5)"/>
+        <line x1="420" y1="52" x2="498" y2="52" marker-end="url(#c8m5)" class="s"/><text x="458" y="44" text-anchor="middle" class="s">yes</text>
+        <line x1="330" y1="92" x2="330" y2="138" marker-end="url(#c8m5)" class="g"/><text x="345" y="120" class="g">no</text>
+        <rect x="220" y="140" width="220" height="44" rx="8" class="g"/><text x="330" y="167" text-anchor="middle">3. generate new unique ID</text>
+        <line x1="330" y1="184" x2="330" y2="218" marker-end="url(#c8m5)"/>
+        <rect x="220" y="220" width="220" height="44" rx="8"/><text x="330" y="247" text-anchor="middle">4. convert ID to base 62</text>
+        <line x1="330" y1="264" x2="330" y2="298" marker-end="url(#c8m5)"/>
+        <rect x="170" y="300" width="320" height="44" rx="8" class="p"/><text x="330" y="327" text-anchor="middle">5. save (ID, shortURL, longURL) in DB</text>
+        <rect x="500" y="140" width="230" height="44" rx="8" stroke-dasharray="4 4"/><text x="615" y="167" text-anchor="middle" class="sm">from distributed ID generator (Ch 7)</text>
+        <line x1="498" y1="162" x2="442" y2="162" stroke-dasharray="4 4" marker-end="url(#c8m5)"/>
+      </svg>
+      <div class="diagram-caption">If the long URL was already shortened, return the existing short URL. Otherwise get a fresh unique ID, encode it in base 62, and store the new row.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Input longURL.</strong> The client calls <code>POST api/v1/data/shorten</code>.</li>
+      <li><strong>Check the database.</strong> Is this longURL already stored?</li>
+      <li><strong>If yes,</strong> it was converted before. Fetch its shortURL from the database and return it. (This avoids creating many codes for the same page.)</li>
+      <li><strong>If no,</strong> the longURL is new. The <strong>unique ID generator</strong> creates a new unique ID (primary key).</li>
+      <li><strong>Convert the ID to a shortURL</strong> with base 62.</li>
+      <li><strong>Create a new row</strong> in the database with the ID, shortURL and longURL.</li>
+    </ol>
+    <h3>Worked example from the book</h3>
+    <ul>
+      <li>Input longURL: <code>https://en.wikipedia.org/wiki/Systems_design</code></li>
+      <li>Unique ID generator returns: <code>2009215674938</code></li>
+      <li>Convert the ID to base 62: <code>zn9edcu</code></li>
+      <li>Save to the database: <code>id = 2009215674938, shortURL = zn9edcu, longURL = https://en.wikipedia.org/wiki/Systems_design</code></li>
+    </ul>
+    <div class="callout info"><div class="callout-title">Why we need a distributed ID generator</div>
+      <p>The ID must be globally unique even when many web servers are creating URLs at the same time across machines. A simple auto-increment column on one database does not work well in a distributed environment. That is why we use a generator like Twitter's Snowflake from Chapter 7.</p>
+    </div>
+  </section>
+
+  <section><h2 id="redirect-flow">URL redirecting deep dive</h2>
+    <p>Since there are 10 times more reads than writes, the <code>&lt;shortURL, longURL&gt;</code> mapping is stored in a <strong>cache</strong> to improve performance. Popular links (say, one shared in a viral tweet) are read over and over; serving them from memory avoids hitting the database each time.</p>
+    <div class="diagram"><div class="diagram-title">URL redirecting flow</div>
+      <svg class="dg" viewBox="0 0 760 300">
+        <defs><marker id="c8m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="120" width="110" height="50" rx="8" class="a"/><text x="75" y="150" text-anchor="middle">User</text>
+        <rect x="180" y="120" width="130" height="50" rx="8" class="y"/><text x="245" y="142" text-anchor="middle">Load</text><text x="245" y="160" text-anchor="middle">balancer</text>
+        <rect x="360" y="120" width="130" height="50" rx="8" class="s"/><text x="425" y="142" text-anchor="middle">Web</text><text x="425" y="160" text-anchor="middle">servers</text>
+        <rect x="570" y="40" width="150" height="50" rx="8" class="g"/><text x="645" y="70" text-anchor="middle">Cache</text>
+        <rect x="570" y="200" width="150" height="50" rx="8" class="p"/><text x="645" y="230" text-anchor="middle">Database</text>
+        <line x1="130" y1="138" x2="178" y2="138" marker-end="url(#c8m6)"/><text x="154" y="128" text-anchor="middle" class="sm">1</text>
+        <line x1="310" y1="138" x2="358" y2="138" marker-end="url(#c8m6)"/><text x="334" y="128" text-anchor="middle" class="sm">2</text>
+        <line x1="490" y1="130" x2="568" y2="70" marker-end="url(#c8m6)"/><text x="520" y="90" class="sm">3. lookup</text>
+        <line x1="490" y1="160" x2="568" y2="220" marker-end="url(#c8m6)"/><text x="490" y="215" class="sm">4. on miss</text>
+        <path d="M645,200 L645,92" stroke-dasharray="4 4" marker-end="url(#c8m6)" class="g"/><text x="655" y="150" class="sm">5. fill cache</text>
+        <path d="M360,165 L132,165" marker-end="url(#c8m6)" class="g"/><text x="245" y="195" text-anchor="middle" class="g">6. 301/302 with Location = longURL</text>
+      </svg>
+      <div class="diagram-caption">Check the cache first. Only on a cache miss do we query the database, then put the result in the cache so the next click is fast.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>A user clicks</strong> a short URL link: <code>https://tinyurl.com/zn9edcu</code>.</li>
+      <li><strong>The load balancer</strong> forwards the request to one of the web servers.</li>
+      <li><strong>If the shortURL is already in the cache</strong>, return the longURL directly.</li>
+      <li><strong>If it is not in the cache</strong>, fetch the longURL from the database. If it is not in the database either, the user probably entered an invalid short URL (return an error such as 404).</li>
+      <li><strong>The longURL is returned to the user</strong> (as a redirect) - and stored in the cache for next time.</li>
+    </ol>
+    <div class="callout tip"><div class="callout-title">Why caching works so well here</div>
+      <p>The data never changes (no updates or deletes allowed), so cached entries never go stale. That removes the hardest part of caching - invalidation. This is a nice point to raise in an interview.</p>
+    </div>
+  </section>
+
+  <section><h2 id="step4-wrap-up">Step 4 - Wrap up</h2>
+    <p>If there is extra time at the end of the interview, here are talking points the book suggests:</p>
+    <div class="cards">
+      <div class="card red"><h4>Rate limiter</h4><p>A malicious user could send an overwhelming number of shortening requests. A rate limiter (Chapter 4) filters out requests based on IP address or other rules.</p></div>
+      <div class="card sky"><h4>Web server scaling</h4><p>The web tier is stateless, so it is easy to scale by adding or removing web servers behind the load balancer.</p></div>
+      <div class="card green"><h4>Database scaling</h4><p><strong>Replication</strong> (copies for reads and safety) and <strong>sharding</strong> (splitting the 365 billion rows across machines) are common techniques.</p></div>
+      <div class="card yellow"><h4>Analytics</h4><p>Data is increasingly important. Integrating an analytics solution answers questions like how many people click a link and when. (Remember 302 helps here.)</p></div>
+      <div class="card purple"><h4>Availability, consistency, reliability</h4><p>These are core to any large system's success. Revisit Chapter 1 for the techniques (redundancy, failover, multiple data centers).</p></div>
+    </div>
+  </section>
+
+  <section><h2 id="putting-it-all-together">Putting it all together</h2>
+    <p>Here is the full system, combining the write path (shortening) and the read path (redirecting).</p>
+    <div class="diagram"><div class="diagram-title">Final URL shortener architecture</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Clients<small>browsers, mobile apps, API users</small></div></div>
+        <div class="arch-down">↓<small>HTTPS</small></div>
+        <div class="arch-row"><div class="node red">Rate limiter<small>blocks abusive IPs</small></div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node yellow">Load balancer</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="group"><span class="group-label">Stateless web tier</span><div class="node sky">Web server 1</div><div class="node sky">Web server 2</div><div class="node sky">Web server N</div></div></div>
+        <div class="arch-down">↓<small>reads check cache first; writes get an ID</small></div>
+        <div class="arch-row"><div class="node purple">Unique ID generator<small>Snowflake-style (Ch 7)</small></div><div class="node green">Cache<small>shortURL &rarr; longURL</small></div></div>
+        <div class="arch-down">↓<small>cache miss / new rows</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">Database (replicated + sharded)</span><div class="node db pink">Shard 1</div><div class="node db pink">Shard 2</div><div class="node db pink">Shard N</div></div></div>
+        <div class="arch-down">↓<small>click events</small></div>
+        <div class="arch-row"><div class="node teal">Analytics</div></div>
+      </div>
+      <div class="diagram-caption">One web tier handles both endpoints. Writes use the ID generator and base 62; reads go cache-first, then database.</div>
+    </div>
+    <h3>Walkthrough 1: shortening a URL</h3>
+    <ol class="steps">
+      <li><strong>Client sends</strong> <code>POST api/v1/data/shorten</code> with <code>longUrl = https://en.wikipedia.org/wiki/Systems_design</code>.</li>
+      <li><strong>Rate limiter</strong> checks the client is not flooding us, and the load balancer picks a web server.</li>
+      <li><strong>Web server checks the database</strong>: has this longURL been shortened before? No.</li>
+      <li><strong>ID generator</strong> returns <code>2009215674938</code>.</li>
+      <li><strong>Base 62 encode</strong> gives <code>zn9edcu</code>.</li>
+      <li><strong>Save the row</strong> and return <code>https://tinyurl.com/zn9edcu</code>.</li>
+    </ol>
+    <h3>Walkthrough 2: clicking the short URL</h3>
+    <ol class="steps">
+      <li><strong>Browser sends</strong> <code>GET https://tinyurl.com/zn9edcu</code>.</li>
+      <li><strong>Load balancer</strong> routes it to any web server (they are all identical).</li>
+      <li><strong>Web server checks the cache</strong> for <code>zn9edcu</code>. First click: miss. It reads the database and fills the cache.</li>
+      <li><strong>Server responds</strong> with a 301 or 302 and <code>Location: https://en.wikipedia.org/wiki/Systems_design</code>.</li>
+      <li><strong>Browser follows</strong> the Location header to Wikipedia. Later clicks by others hit the cache directly; with 301, repeat clicks by the same browser skip us entirely.</li>
+    </ol>
+  </section>
+
+  <section><h2 id="interview">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Clarify requirements and estimate</div><div class="iv-time">3-10 min</div></div>
+      <ul><li>Ask for an example, traffic volume, short URL length, allowed characters, and whether deletes/updates are needed.</li><li>Do the estimate out loud: writes/sec, reads/sec, records over 10 years, storage.</li></ul>
+      <div class="say">"Let me confirm scope: we shorten long URLs and redirect short ones. 100 million new URLs a day is about 1,160 writes per second. With a 10:1 read ratio that is 11,600 reads per second. Over 10 years that is 365 billion records, so hundreds of terabytes - definitely a database, not memory. The characters are 0-9, a-z, A-Z, so 62 options per character."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">High-level design</div><div class="iv-time">10-15 min</div></div>
+      <ul><li>Two APIs: POST shorten, GET redirect.</li><li>Draw the redirect exchange and explain 301 vs 302.</li><li>Introduce the hash function idea.</li></ul>
+      <div class="say">"I need two endpoints: POST api/v1/data/shorten that returns the short URL, and GET api/v1/{shortUrl} that returns a redirect. For the redirect, the server responds with a 3xx status and the long URL in the Location header."</div>
+      <div class="say them">"Would you use 301 or 302?"</div>
+      <div class="say">"It depends on the priority. 301 is permanent, so browsers cache it and later clicks never reach us - good for reducing server load. 302 is temporary, so every click comes back to us - which is what we want if analytics like click rate and source matter. If the business wants analytics, I would choose 302."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Deep dive</div><div class="iv-time">10-25 min</div></div>
+      <ul><li>Data model: relational table (id, shortURL, longURL).</li><li>Compute length: 62^7 is about 3.5 trillion &ge; 365 billion, so 7 characters.</li><li>Compare hash + collision vs base 62, pick one and justify.</li><li>Draw the shortening flow and the redirect flow with cache.</li></ul>
+      <div class="say">"62 to the 6th is about 56.8 billion, not enough; 62 to the 7th is about 3.5 trillion, so 7 characters suffice. I could hash the URL with CRC32 and take 7 characters, but then I must handle collisions with a DB lookup per write. Instead I will use a distributed unique ID generator and base 62 encode the ID - collisions are impossible."</div>
+      <div class="say them">"Base 62 IDs are sequential. Isn't that a security problem?"</div>
+      <div class="say">"Yes - if IDs increase by 1, someone can guess the next short URL and enumerate links. Mitigations include using a Snowflake-style ID, whose lower bits change with machine and sequence so it is less predictable, or adopting the hash approach if unpredictability is a hard requirement. It is a trade-off between simplicity and guessability."</div>
+      <div class="say them">"What if the same long URL is submitted twice?"</div>
+      <div class="say">"The shortening flow checks the database for the longURL first. If it exists, we return the existing short URL rather than creating a new one. An index on longURL keeps that check fast."</div>
+      <div class="say them">"How do you handle 11,600 reads per second?"</div>
+      <div class="say">"Cache the shortURL-to-longURL mapping. Since mappings never change, cached entries never go stale. Popular links stay hot in cache, and only misses go to the database, which can also have read replicas."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3-5 min</div></div>
+      <ul><li>Rate limiter, stateless web tier scaling, DB replication and sharding, analytics, availability/consistency/reliability.</li></ul>
+      <div class="say">"To finish: I would put a rate limiter in front to stop abuse, scale the stateless web tier horizontally, replicate and shard the database as it grows to hundreds of billions of rows, and stream click events to an analytics system."</div>
+    </div>
+  </section>
+
+  <section><h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Skipping the length math</div><p>Saying "I'll use 6 or 7 characters" without justifying it. Always show 62<sup>n</sup> &ge; 365 billion and conclude n = 7.</p></div>
+    <div class="callout danger"><div class="callout-title">Ignoring collisions</div><p>Proposing "MD5 and take 7 characters" without saying what happens when two URLs share a prefix. Truncated hashes collide; you must check and resolve.</p></div>
+    <div class="callout warn"><div class="callout-title">Picking 301 or 302 without a reason</div><p>Both are valid. The interviewer wants to hear the trade-off: server load (301) vs analytics accuracy (302).</p></div>
+    <div class="callout warn"><div class="callout-title">Storing everything in memory</div><p>A hash table is fine for the high-level sketch, but with 365 billion records you need a durable database plus a cache.</p></div>
+    <div class="callout warn"><div class="callout-title">Using a single auto-increment column for IDs</div><p>It becomes a bottleneck and single point of failure across many servers. Reference the distributed ID generator from Chapter 7.</p></div>
+    <div class="callout warn"><div class="callout-title">Forgetting the read-heavy ratio</div><p>Designing only the write path. The 10:1 ratio means the redirect path and its cache matter most.</p></div>
+  </section>
+
+  <section><h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. With 100 million new URLs per day, roughly how many writes per second is that?</summary><div><p>About 1,160. A day has 86,400 seconds, and 100,000,000 / 86,400 is about 1,157, rounded to 1,160.</p></div></details>
+      <details><summary>2. Why is the short code 7 characters long?</summary><div><p>We need at least 365 billion unique codes. With 62 symbols, 62<sup>6</sup> is about 56.8 billion (too few) and 62<sup>7</sup> is about 3.5 trillion (enough). So 7 is the smallest length that works.</p></div></details>
+      <details><summary>3. Convert 11157 to base 62.</summary><div><p>11157 / 62 = 179 r 59 ('X'); 179 / 62 = 2 r 55 ('T'); 2 / 62 = 0 r 2 ('2'). Reading remainders bottom-up gives "2TX".</p></div></details>
+      <details><summary>4. The marketing team wants to know how many times each link is clicked. Which redirect code do you choose?</summary><div><p>302. With 301, browsers cache the redirect, so repeat clicks never reach the server and are not counted. 302 sends every click through the shortener, making tracking accurate - at the cost of more server load.</p></div></details>
+      <details><summary>5. What happens to the browser's later requests after it receives a 301?</summary><div><p>The browser has cached the permanent redirect, so it goes directly to the long URL without contacting the shortener.</p></div></details>
+      <details><summary>6. Why can CRC32 + "take first 7 chars" produce collisions, and how does the book resolve them?</summary><div><p>Truncating a hash throws away information, so two different URLs can share the same first 7 characters. The fix is to append a predefined string to the long URL and hash again, repeating until the code is unused in the database.</p></div></details>
+      <details><summary>7. How does a Bloom filter help the hash approach?</summary><div><p>Checking the database for every new code is expensive. A Bloom filter in memory can say "definitely not present" quickly, letting us skip the database query in most cases. It may give false positives ("maybe present"), in which case we confirm with the database.</p></div></details>
+      <details><summary>8. Name one advantage and one disadvantage of base 62 conversion versus hashing.</summary><div><p>Advantage: collisions are impossible because each ID is unique. Disadvantage: it depends on a unique ID generator, and if IDs increase by 1 the next short URL is easy to guess (security concern). Also, the length is not fixed.</p></div></details>
+      <details><summary>9. A user submits a long URL that was already shortened last week. What does the system do?</summary><div><p>The shortening flow first checks whether the longURL is in the database. It is, so the service returns the existing shortURL instead of generating a new ID.</p></div></details>
+      <details><summary>10. Why is caching especially easy in this system?</summary><div><p>Short URLs cannot be updated or deleted, so a cached mapping is always correct. There is no cache invalidation problem, and the 10:1 read ratio means the cache absorbs most traffic.</p></div></details>
+    </div>
+  </section>
+
+  <section><h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Two features: shorten (POST api/v1/data/shorten) and redirect (GET api/v1/shortUrl).</li>
+      <li>100M URLs/day &rarr; ~1,160 writes/s; 10:1 ratio &rarr; ~11,600 reads/s.</li>
+      <li>10 years &rarr; 365 billion records; at 100 bytes each the book estimates 365 TB.</li>
+      <li>62 characters (0-9, a-z, A-Z); 62<sup>7</sup> &asymp; 3.5 trillion &ge; 365 billion &rarr; 7 chars.</li>
+      <li>301 = permanent, browser caches, less load. 302 = temporary, every click hits us, better analytics.</li>
+      <li>Redirect response carries the long URL in the Location header.</li>
+      <li>Store mappings in a relational DB table (id, shortURL, longURL), not just memory.</li>
+      <li>Hash approach: CRC32/MD5/SHA-1, take 7 chars, resolve collisions by appending a string; Bloom filter speeds checks.</li>
+      <li>Base 62 approach: unique ID (Ch 7) &rarr; base 62; no collisions, but variable length and guessable if sequential.</li>
+      <li>Shortening flow: longURL in DB? return it : new ID &rarr; base 62 &rarr; save.</li>
+      <li>Redirect flow: load balancer &rarr; web server &rarr; cache &rarr; DB on miss.</li>
+      <li>Wrap up: rate limiter, stateless web tier, DB replication + sharding, analytics, availability.</li>
+    </ul></div>
+  </section>
+</main>
+<script src="assets/app.js"></script></body></html>

@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 7 - Design a Unique ID Generator in Distributed Systems</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="7">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 7</div><h1>Design a Unique ID Generator in Distributed Systems</h1>
+    <p class="lead">Every tweet, order and message needs an ID that no other record will ever share. On one database that is trivial: just count 1, 2, 3. Across hundreds of servers in several data centers, generating thousands of IDs per second without ever colliding, and keeping them sorted by time, takes a clever trick. This chapter compares four approaches and then takes apart Twitter's snowflake bit by bit.</p>
+    <div class="meta"><span class="tag">~35 min read</span><span class="tag">Intermediate</span><span class="tag">Prerequisites: Ch 1 (scaling basics), binary numbers (explained here)</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>Databases identify each row with a <strong>primary key</strong>, a value that is unique to that row. In a traditional single database, you mark the ID column as <code>auto_increment</code>, and the database hands out 1, 2, 3, 4... automatically.</p>
+    <p>The book's opening point: <strong>auto_increment does not work in a distributed environment</strong>. A single database server is not large enough to handle all the traffic, and generating unique IDs across multiple databases with minimal delay is challenging. If two databases both count from 1, they will both hand out ID 1, 2, 3... and you get duplicates.</p>
+    <div class="diagram"><div class="diagram-title">Why auto_increment breaks</div>
+      <div class="flow">
+        <div class="node db sky">Database A<small>auto_increment: 1, 2, 3...</small></div>
+        <div class="arrow">+</div>
+        <div class="node db sky">Database B<small>auto_increment: 1, 2, 3...</small></div>
+        <div class="arrow">→</div>
+        <div class="node red">Duplicate IDs<small>two different rows both called "1"</small></div>
+      </div>
+      <div class="diagram-caption">With one database, auto_increment is perfect but that database becomes a bottleneck and a single point of failure. With many, each counts independently and IDs collide.</div>
+    </div>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Think of a deli counter where you pull a ticket number. One ticket machine works great for one shop. Now imagine a chain of 1,000 shops that must never print the same number twice, anywhere, ever, and the numbers should roughly show who came first across the whole chain. You could have all shops phone one central machine (slow, and if it breaks every shop stops). Or you could print tickets that combine <em>the exact time</em>, <em>the shop number</em>, and <em>a small counter for that shop that moment</em>. Two shops cannot collide because the shop number differs; one shop cannot collide with itself because the time or counter differs. That second idea is Twitter's snowflake.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Unique ID</dt><dd>A value guaranteed never to be given to two different records.</dd>
+      <dt>Primary key</dt><dd>The column a database uses to uniquely identify each row.</dd>
+      <dt>auto_increment</dt><dd>A database feature that automatically gives each new row the next number (1, 2, 3...).</dd>
+      <dt>Distributed system</dt><dd>A system that runs on many computers working together over a network.</dd>
+      <dt>Bit</dt><dd>A single binary digit, 0 or 1. Computers store numbers as strings of bits.</dd>
+      <dt>64-bit integer</dt><dd>A whole number stored in exactly 64 bits. Most databases and languages handle these natively (for example a <code>BIGINT</code> column or a Java <code>long</code>).</dd>
+      <dt>Sign bit</dt><dd>The leftmost bit of a signed integer; 0 means positive, 1 means negative.</dd>
+      <dt>Binary / decimal</dt><dd>Base 2 (digits 0-1) versus base 10 (digits 0-9). Binary <code>101</code> = decimal 5.</dd>
+      <dt>Bit shift (&lt;&lt;, &gt;&gt;)</dt><dd>Moving all bits left or right. <code>x &lt;&lt; 3</code> moves x three places left, the same as multiplying by 8. Used to place a value into its section of the ID.</dd>
+      <dt>Bitwise OR (|) / AND (&amp;)</dt><dd>Operations that combine bits. OR glues sections together; AND with a mask extracts a section.</dd>
+      <dt>Multi-master replication</dt><dd>A setup with several database servers that all accept writes.</dd>
+      <dt>UUID</dt><dd>Universally Unique Identifier: a 128-bit random-looking value that can be generated anywhere with almost no chance of collision.</dd>
+      <dt>Ticket server</dt><dd>A single dedicated server whose only job is to hand out increasing IDs to everyone else (an approach used by Flickr).</dd>
+      <dt>Single point of failure (SPOF)</dt><dd>One component whose failure brings down the whole system.</dd>
+      <dt>Snowflake</dt><dd>Twitter's ID generation scheme: a 64-bit ID built from timestamp, datacenter ID, machine ID and sequence number.</dd>
+      <dt>Epoch</dt><dd>The "zero" moment from which time is counted. Unix epoch is 1 Jan 1970; snowflake uses a custom epoch.</dd>
+      <dt>Millisecond (ms)</dt><dd>One thousandth of a second.</dd>
+      <dt>Sequence number</dt><dd>A small counter that distinguishes IDs created by the same machine in the same millisecond.</dd>
+      <dt>NTP</dt><dd>Network Time Protocol: the standard way computers synchronize their clocks over the network.</dd>
+      <dt>Clock skew / drift</dt><dd>When two computers' clocks disagree, or one clock slowly runs fast or slow.</dd>
+      <dt>Time-sortable</dt><dd>Sorting IDs numerically also sorts them by creation time.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="requirements">Understand the problem and design scope</h2>
+    <p>Asking clarification questions is the first step. The book's candidate-interviewer dialogue goes roughly like this:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th></tr>
+      <tr><td>What are the characteristics of unique IDs?</td><td>IDs must be unique and sortable.</td></tr>
+      <tr><td>For each new record, does the ID increment by 1?</td><td>The ID increments by time but not necessarily by 1. IDs created in the evening are larger than those created in the morning on the same day.</td></tr>
+      <tr><td>Do IDs only contain numerical values?</td><td>Yes, that is correct.</td></tr>
+      <tr><td>What is the ID length requirement?</td><td>IDs should fit into 64 bits.</td></tr>
+      <tr><td>What is the scale of the system?</td><td>The system should be able to generate 10,000 IDs per second.</td></tr>
+    </table></div>
+    <p>From that, the requirements are:</p>
+    <div class="cards">
+      <div class="card green"><h4>Unique</h4><p>IDs must be unique, across every server, forever.</p></div>
+      <div class="card sky"><h4>Numerical</h4><p>IDs are numerical values only.</p></div>
+      <div class="card purple"><h4>64-bit</h4><p>IDs fit into 64 bits.</p></div>
+      <div class="card yellow"><h4>Ordered by date</h4><p>Later IDs are bigger than earlier ones (roughly).</p></div>
+      <div class="card pink"><h4>10,000 / second</h4><p>The ability to generate over 10,000 unique IDs per second.</p></div>
+    </div>
+    <div class="callout info"><div class="callout-title">Why "ordered by date" matters</div>
+      <p>If IDs grow with time, you can sort records by ID instead of keeping a separate timestamp index, and "give me the 20 newest tweets" becomes "the 20 largest IDs". Databases also insert time-ordered keys more efficiently than random ones.</p>
+    </div>
+    <div class="callout tip"><div class="callout-title">Why 64 bits?</div>
+      <p>A 64-bit number fits in a standard integer type in almost every language and database, so it is compact, fast to compare and index. 64 bits can hold about 18 quintillion values (2<sup>64</sup>), which is plenty if we use the bits wisely.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="options">High-level design: four options</h2>
+    <p>The book lists multiple options for generating unique IDs in distributed systems:</p>
+    <ol class="steps">
+      <li><strong>Multi-master replication</strong></li>
+      <li><strong>Universally unique identifier (UUID)</strong></li>
+      <li><strong>Ticket server</strong></li>
+      <li><strong>Twitter snowflake approach</strong></li>
+    </ol>
+    <p>For each, we look at how it works, then pros and cons against our five requirements.</p>
+  </section>
+
+  <section>
+    <h2 id="multi-master">Option 1: Multi-master replication</h2>
+    <p>This approach still uses the databases' <code>auto_increment</code> feature, but with a twist: instead of increasing the next ID by 1, we increase it by <strong>k</strong>, where k is the number of database servers in use.</p>
+    <div class="diagram"><div class="diagram-title">Multi-master replication with k = 2</div>
+      <svg class="dg" viewBox="0 0 600 230">
+        <defs><marker id="c7-arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="200" y="20" width="200" height="44" rx="8" class="a"/><text x="300" y="47" text-anchor="middle">Web servers</text>
+        <line x1="260" y1="64" x2="150" y2="116" marker-end="url(#c7-arr1)"/>
+        <line x1="340" y1="64" x2="450" y2="116" marker-end="url(#c7-arr1)"/>
+        <rect x="50" y="120" width="200" height="54" rx="8" class="s"/><text x="150" y="143" text-anchor="middle">MySQL server 1</text>
+        <text x="150" y="163" text-anchor="middle" class="sm">start 1, step 2</text>
+        <rect x="350" y="120" width="200" height="54" rx="8" class="p"/><text x="450" y="143" text-anchor="middle">MySQL server 2</text>
+        <text x="450" y="163" text-anchor="middle" class="sm">start 2, step 2</text>
+        <text x="150" y="205" text-anchor="middle" class="s">1, 3, 5, 7, 9 ...</text>
+        <text x="450" y="205" text-anchor="middle" class="p">2, 4, 6, 8, 10 ...</text>
+      </svg>
+      <div class="diagram-caption">With two servers (k = 2), server 1 hands out odd numbers and server 2 even numbers. They can never collide, and each can work independently.</div>
+    </div>
+    <p><strong>How it works:</strong> the next ID on a server equals the previous ID on that same server plus k. With 3 servers, server 1 gives 1, 4, 7...; server 2 gives 2, 5, 8...; server 3 gives 3, 6, 9.... This solves some scalability issues because IDs can scale with the number of database servers.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Simple: reuses a built-in database feature.</li>
+        <li>Numeric IDs that fit in 64 bits.</li>
+        <li>Throughput scales with the number of database servers.</li>
+      </ul></div>
+      <div class="cons"><h4>Cons (from the book)</h4><ul>
+        <li>Hard to scale with multiple data centers.</li>
+        <li>IDs do not go up with time across multiple servers. If server 2 is busier, it might be at ID 1,000 while server 1 is at 11, so a newer record can have a smaller ID.</li>
+        <li>It does not scale well when a server is added or removed: k changes, and every server's step must be reconfigured without creating overlaps.</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="uuid">Option 2: UUID</h2>
+    <p>A UUID is another easy way to obtain unique IDs. A UUID is a <strong>128-bit</strong> number used to identify information in computer systems. It is usually written as 32 hexadecimal characters in five groups, for example:</p>
+<pre><code>09c93e62-50b4-468d-bf8a-c07e1040bfb2</code></pre>
+    <p>UUIDs have a very low probability of collision. Quoting the book's source (Wikipedia): after generating <strong>1 billion UUIDs every second for approximately 100 years</strong>, the probability of creating a single duplicate would reach <strong>50%</strong>. In other words, collisions are not a practical concern.</p>
+    <p><strong>How it works:</strong> UUIDs can be generated independently without coordination between servers. Each web server contains its own ID generator, and each web server is responsible for generating IDs independently.</p>
+    <div class="diagram"><div class="diagram-title">Every web server generates its own UUIDs</div>
+      <div class="flow">
+        <div class="group"><span class="group-label">Web server 1</span><div class="node green">ID generator</div></div>
+        <div class="group"><span class="group-label">Web server 2</span><div class="node green">ID generator</div></div>
+        <div class="group"><span class="group-label">Web server 3</span><div class="node green">ID generator</div></div>
+        <div class="group"><span class="group-label">Web server 4</span><div class="node green">ID generator</div></div>
+      </div>
+      <div class="diagram-caption">No server talks to any other to create an ID. Randomness (128 bits of it) is what keeps them unique.</div>
+    </div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros (from the book)</h4><ul>
+        <li>Generating UUIDs is simple. No coordination between servers is needed, so there are no synchronization issues.</li>
+        <li>The system is easy to scale because each web server is responsible for generating the IDs it consumes. The ID generator scales with web servers.</li>
+      </ul></div>
+      <div class="cons"><h4>Cons (from the book)</h4><ul>
+        <li>IDs are 128 bits long, but our requirement is 64 bits.</li>
+        <li>IDs do not go up with time.</li>
+        <li>IDs could be non-numeric (they contain letters a-f in their usual form).</li>
+      </ul></div>
+    </div>
+    <div class="callout tip"><div class="callout-title">When UUID is the right answer</div>
+      <p>If the interviewer did not require 64-bit, numeric or time-sorted IDs, a UUID is often the simplest correct choice. Requirements drive the design.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="ticket-server">Option 3: Ticket server</h2>
+    <p>Ticket servers are another interesting way to generate unique IDs. Flickr developed ticket servers to generate distributed primary keys.</p>
+    <p><strong>How it works:</strong> use a centralized <code>auto_increment</code> feature in a <em>single</em> database server, the Ticket Server. Every web server asks the ticket server for the next number whenever it needs an ID.</p>
+    <div class="diagram"><div class="diagram-title">Ticket server</div>
+      <div class="arch">
+        <div class="arch-row">
+          <div class="node accent">Web server 1</div>
+          <div class="node accent">Web server 2</div>
+          <div class="node accent">Web server 3</div>
+        </div>
+        <div class="arch-down">↓<small>"give me the next ID"</small></div>
+        <div class="arch-row"><div class="node db yellow">Ticket server<small>single database with auto_increment</small></div></div>
+        <div class="arch-down">↓<small>returns 1001, 1002, 1003...</small></div>
+        <div class="arch-row"><div class="node green">Globally unique, increasing numeric IDs</div></div>
+      </div>
+      <div class="diagram-caption">Only one machine counts, so there can be no duplicates. But every ID request depends on that one machine.</div>
+    </div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros (from the book)</h4><ul>
+        <li>Numeric IDs.</li>
+        <li>It is easy to implement, and it works for small to medium-scale applications.</li>
+      </ul></div>
+      <div class="cons"><h4>Cons (from the book)</h4><ul>
+        <li>Single point of failure. A single ticket server means if it goes down, all systems that depend on it face issues.</li>
+        <li>To avoid a single point of failure, we can set up multiple ticket servers. However, this introduces new challenges such as data synchronization.</li>
+      </ul></div>
+    </div>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>The ticket server is the one ticket machine at the entrance of a huge government office. Everyone gets a perfectly ordered number. But if it jams, nobody gets served, and with a long enough queue it becomes the slowest part of the visit.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="snowflake">Option 4: Twitter snowflake approach</h2>
+    <p>None of the approaches above meets all our requirements. Twitter's unique ID generation system, called <strong>snowflake</strong>, is inspiring and can satisfy them.</p>
+    <p>The key idea is <strong>divide and conquer</strong>. Instead of generating an ID directly, we divide the 64 bits of an ID into different sections, each with its own job.</p>
+    <div class="diagram"><div class="diagram-title">The 64-bit snowflake ID layout</div>
+      <svg class="dg" viewBox="0 0 760 170">
+        <text x="30" y="38" text-anchor="middle" class="sm">63</text>
+        <text x="210" y="38" text-anchor="middle" class="sm">bits 62 to 22</text>
+        <text x="425" y="38" text-anchor="middle" class="sm">21 to 17</text>
+        <text x="535" y="38" text-anchor="middle" class="sm">16 to 12</text>
+        <text x="670" y="38" text-anchor="middle" class="sm">11 to 0</text>
+        <rect x="10" y="50" width="40" height="50" rx="4"/><text x="30" y="80" text-anchor="middle" class="sm">sign</text>
+        <rect x="50" y="50" width="320" height="50" rx="4" class="s"/><text x="210" y="80" text-anchor="middle" class="s">timestamp</text>
+        <rect x="370" y="50" width="110" height="50" rx="4" class="g"/><text x="425" y="80" text-anchor="middle" class="g">datacenter ID</text>
+        <rect x="480" y="50" width="110" height="50" rx="4" class="y"/><text x="535" y="80" text-anchor="middle" class="y">machine ID</text>
+        <rect x="590" y="50" width="160" height="50" rx="4" class="p"/><text x="670" y="80" text-anchor="middle" class="p">sequence number</text>
+        <text x="30" y="122" text-anchor="middle">1 bit</text>
+        <text x="210" y="122" text-anchor="middle">41 bits</text>
+        <text x="425" y="122" text-anchor="middle">5 bits</text>
+        <text x="535" y="122" text-anchor="middle">5 bits</text>
+        <text x="670" y="122" text-anchor="middle">12 bits</text>
+        <text x="30" y="145" text-anchor="middle" class="sm">always 0</text>
+        <text x="210" y="145" text-anchor="middle" class="sm">ms since custom epoch</text>
+        <text x="425" y="145" text-anchor="middle" class="sm">32 datacenters</text>
+        <text x="535" y="145" text-anchor="middle" class="sm">32 per datacenter</text>
+        <text x="670" y="145" text-anchor="middle" class="sm">4096 per ms</text>
+        <text x="380" y="166" text-anchor="middle" class="sm">1 + 41 + 5 + 5 + 12 = 64 bits</text>
+      </svg>
+      <div class="diagram-caption">Most significant bit on the left. Because the timestamp sits in the high bits, comparing two IDs numerically compares their creation times first.</div>
+    </div>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Section</th><th>Bits</th><th>What it holds</th><th>Range</th></tr>
+      <tr><td><strong>Sign bit</strong></td><td>1</td><td>Always 0. Reserved for future uses; it could potentially be used to distinguish between signed and unsigned numbers.</td><td>0</td></tr>
+      <tr><td><strong>Timestamp</strong></td><td>41</td><td>Milliseconds since the epoch or a custom epoch. Twitter snowflake's default epoch is <code>1288834974657</code>, equivalent to Nov 04, 2010, 01:42:54 UTC.</td><td>0 to 2<sup>41</sup>-1</td></tr>
+      <tr><td><strong>Datacenter ID</strong></td><td>5</td><td>Which data center generated the ID.</td><td>2<sup>5</sup> = 32 datacenters</td></tr>
+      <tr><td><strong>Machine ID</strong></td><td>5</td><td>Which machine in that data center.</td><td>2<sup>5</sup> = 32 machines per datacenter</td></tr>
+      <tr><td><strong>Sequence number</strong></td><td>12</td><td>For every ID generated on that machine/process, incremented by 1. Reset to 0 every millisecond.</td><td>2<sup>12</sup> = 4096 values</td></tr>
+    </table></div>
+    <div class="stats">
+      <div class="stat"><b>64</b><span>bits per ID</span></div>
+      <div class="stat"><b>32 x 32</b><span>= 1024 generator machines</span></div>
+      <div class="stat"><b>4096</b><span>IDs per ms per machine</span></div>
+      <div class="stat"><b>~69 yrs</b><span>timestamp lifetime</span></div>
+    </div>
+    <h3>Why this satisfies every requirement</h3>
+    <ul>
+      <li><strong>Unique:</strong> two different machines differ in datacenter ID or machine ID. The same machine never repeats because either the millisecond or the sequence number differs.</li>
+      <li><strong>Numerical and 64-bit:</strong> the whole ID is one 64-bit integer.</li>
+      <li><strong>Ordered by date:</strong> the timestamp occupies the highest bits, so larger timestamps mean larger IDs.</li>
+      <li><strong>10,000 per second:</strong> even one machine can theoretically produce 4096 per millisecond, which is about 4 million per second.</li>
+      <li><strong>No coordination:</strong> each machine generates IDs on its own, like UUID, so there is no single point of failure like the ticket server.</li>
+    </ul>
+    <div class="diagram"><div class="diagram-title">Same millisecond, same sequence, different machines: still unique</div>
+      <svg class="dg" viewBox="0 0 760 200">
+        <text x="10" y="32" text-anchor="start" class="sm">Machine A: datacenter 3, machine 7</text>
+        <rect x="10" y="40" width="40" height="40" rx="4"/><text x="30" y="65" text-anchor="middle">0</text>
+        <rect x="50" y="40" width="320" height="40" rx="4" class="s"/><text x="210" y="65" text-anchor="middle">297616116568</text>
+        <rect x="370" y="40" width="110" height="40" rx="4" class="g"/><text x="425" y="65" text-anchor="middle">3</text>
+        <rect x="480" y="40" width="110" height="40" rx="4" class="r"/><text x="535" y="65" text-anchor="middle" class="r">7</text>
+        <rect x="590" y="40" width="160" height="40" rx="4" class="p"/><text x="670" y="65" text-anchor="middle">5</text>
+        <text x="10" y="107" text-anchor="start" class="sm">Machine B: datacenter 3, machine 8</text>
+        <rect x="10" y="115" width="40" height="40" rx="4"/><text x="30" y="140" text-anchor="middle">0</text>
+        <rect x="50" y="115" width="320" height="40" rx="4" class="s"/><text x="210" y="140" text-anchor="middle">297616116568</text>
+        <rect x="370" y="115" width="110" height="40" rx="4" class="g"/><text x="425" y="140" text-anchor="middle">3</text>
+        <rect x="480" y="115" width="110" height="40" rx="4" class="r"/><text x="535" y="140" text-anchor="middle" class="r">8</text>
+        <rect x="590" y="115" width="160" height="40" rx="4" class="p"/><text x="670" y="140" text-anchor="middle">5</text>
+        <text x="380" y="185" text-anchor="middle" class="sm">only the machine ID differs, and that is enough to make the 64-bit numbers different</text>
+      </svg>
+      <div class="diagram-caption">Two generators fire in the same millisecond, each issuing its 6th ID (sequence 5). Because no two generators share the same datacenter + machine pair, their IDs can never be equal.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="binary-primer">A 2-minute binary primer</h2>
+    <p>To understand the deep dive, you only need three ideas about binary numbers.</p>
+    <ol class="steps">
+      <li><strong>Each position is a power of 2.</strong> From the right: 1, 2, 4, 8, 16... Binary <code>1011</code> = 8 + 0 + 2 + 1 = <strong>11</strong>.</li>
+      <li><strong>n bits can hold 2<sup>n</sup> different values</strong>, from 0 to 2<sup>n</sup>-1. 5 bits: 0 to 31 (32 values). 12 bits: 0 to 4095 (4096 values).</li>
+      <li><strong>Shifting left makes room.</strong> <code>x &lt;&lt; 12</code> slides x twelve places left and fills the right with twelve zeros, so another 12-bit value can be dropped into that space with OR (<code>|</code>). That is how we pack several small numbers into one big one.</li>
+    </ol>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>A phone number like +1 415 555 0123 packs a country code, area code, exchange and line number into one long number. Each part has a fixed number of digits, so you can always split it back apart. A snowflake ID does exactly this, but in binary digits.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="timestamp">Deep dive: the timestamp</h2>
+    <p>The most important 41 bits make up the timestamp section. As timestamps grow with time, IDs are sortable by time.</p>
+    <p>The value stored is <strong>milliseconds since a custom epoch</strong>. Why not since the standard Unix epoch (1 January 1970)? Because every millisecond between 1970 and when your system launched would be wasted space in those 41 bits. Starting the clock at your own launch date gives you the full lifetime going forward. Twitter's epoch is <code>1288834974657</code> ms after the Unix epoch, which is <strong>Nov 04, 2010, 01:42:54 UTC</strong>.</p>
+    <h3>Worked example: binary timestamp back to UTC (from the book)</h3>
+    <ol class="steps">
+      <li><strong>Take the 41-bit timestamp section of an ID:</strong><br><code>00100010101001011010011011000101101011000</code></li>
+      <li><strong>Convert binary to decimal:</strong> <code>297616116568</code>. This is how many milliseconds have passed since Twitter's epoch.</li>
+      <li><strong>Add Twitter's epoch</strong> to get milliseconds since the Unix epoch:<br><code>297616116568 + 1288834974657 = 1586451091225</code></li>
+      <li><strong>Convert milliseconds since the Unix epoch to UTC:</strong> <code>1586451091225</code> ms = <strong>Apr 09 2020 16:51:31 UTC</strong>.</li>
+    </ol>
+<pre><code>timestamp_bits = 0b00100010101001011010011011000101101011000
+ms_since_twitter_epoch = 297616116568
+unix_ms = ms_since_twitter_epoch + 1288834974657   # = 1586451091225
+utc = from_unix_millis(unix_ms)                    # 2020-04-09 16:51:31.225 UTC</code></pre>
+    <h3>How long does 41 bits last?</h3>
+    <p>The maximum timestamp that can be represented in 41 bits is:</p>
+<pre><code>2^41 - 1 = 2199023255551 milliseconds
+         = 2199023255551 / 1000 / 365 / 24 / 3600
+         ~ 69 years</code></pre>
+    <div class="diagram"><div class="diagram-title">Timestamp lifetime with Twitter's epoch</div>
+      <svg class="dg" viewBox="0 0 720 160">
+        <line x1="40" y1="90" x2="680" y2="90" class="s"/>
+        <circle cx="40" cy="90" r="7" class="fill-g"/>
+        <circle cx="127" cy="90" r="7" class="fill-y"/>
+        <circle cx="680" cy="90" r="7" class="fill-r"/>
+        <text x="40" y="55" text-anchor="start" class="g">Nov 04 2010 01:42:54 UTC</text>
+        <text x="40" y="72" text-anchor="start" class="sm">custom epoch: timestamp = 0</text>
+        <text x="127" y="118" text-anchor="middle" class="y">Apr 09 2020 16:51:31 UTC</text>
+        <text x="127" y="134" text-anchor="middle" class="sm">worked example: 297616116568</text>
+        <text x="680" y="55" text-anchor="end" class="r">about 69 years later</text>
+        <text x="680" y="72" text-anchor="end" class="sm">timestamp = 2^41 - 1, bits run out</text>
+        <text x="470" y="118" text-anchor="middle" class="sm">IDs stay sortable by time throughout</text>
+      </svg>
+      <div class="diagram-caption">The ID generator works for roughly 69 years from the chosen epoch. After that, we need a new epoch time or must adopt other techniques to migrate IDs.</div>
+    </div>
+    <div class="callout key"><div class="callout-title">Takeaway</div>
+      <p>The ID generator will work for 69 years. Having a custom epoch time close to today's date delays the overflow time. After 69 years, we will need a new epoch time or to adopt other techniques to migrate IDs.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="ids-and-sequence">Deep dive: datacenter ID, machine ID and sequence number</h2>
+    <h3>Datacenter ID and machine ID</h3>
+    <p>Datacenter IDs and machine IDs are <strong>chosen at the startup time</strong>, and generally fixed once the system is up and running. Any changes in datacenter IDs and machine IDs require careful review, since an accidental change in those values can lead to ID conflicts. For example, if two machines are accidentally both configured as datacenter 3, machine 7, they could produce identical IDs in the same millisecond.</p>
+    <p>With 5 bits each, we can have 2<sup>5</sup> = 32 datacenters and 32 machines per datacenter.</p>
+    <h3>Sequence number</h3>
+    <p>The sequence number is 12 bits, which gives 2<sup>12</sup> = <strong>4096 combinations</strong>. This field is 0 unless more than one ID is generated in a millisecond on the same server. In theory, a machine can support a maximum of 4096 new IDs per millisecond.</p>
+    <div class="diagram"><div class="diagram-title">Sequence numbers on one machine</div>
+      <svg class="dg" viewBox="0 0 700 200">
+        <defs><marker id="c7-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <line x1="30" y1="100" x2="680" y2="100" marker-end="url(#c7-arr2)"/>
+        <text x="670" y="125" text-anchor="end" class="sm">time</text>
+        <line x1="60" y1="85" x2="60" y2="115"/><line x1="260" y1="85" x2="260" y2="115"/><line x1="460" y1="85" x2="460" y2="115"/>
+        <text x="160" y="140" text-anchor="middle" class="sm">millisecond T</text>
+        <text x="360" y="140" text-anchor="middle" class="sm">millisecond T+1</text>
+        <text x="560" y="140" text-anchor="middle" class="sm">millisecond T+2</text>
+        <rect x="75" y="40" width="50" height="34" rx="6" class="p"/><text x="100" y="62" text-anchor="middle">0</text>
+        <rect x="135" y="40" width="50" height="34" rx="6" class="p"/><text x="160" y="62" text-anchor="middle">1</text>
+        <rect x="195" y="40" width="50" height="34" rx="6" class="p"/><text x="220" y="62" text-anchor="middle">2</text>
+        <rect x="335" y="40" width="50" height="34" rx="6" class="g"/><text x="360" y="62" text-anchor="middle">0</text>
+        <rect x="510" y="40" width="50" height="34" rx="6" class="g"/><text x="535" y="62" text-anchor="middle">0</text>
+        <rect x="570" y="40" width="50" height="34" rx="6" class="g"/><text x="595" y="62" text-anchor="middle">1</text>
+        <text x="160" y="25" text-anchor="middle" class="sm">3 IDs in one ms: seq 0, 1, 2</text>
+        <text x="360" y="25" text-anchor="middle" class="sm">reset to 0</text>
+        <text x="565" y="25" text-anchor="middle" class="sm">reset again</text>
+        <text x="350" y="180" text-anchor="middle" class="sm">max 4096 IDs (seq 0 to 4095) per machine per millisecond</text>
+      </svg>
+      <div class="diagram-caption">The sequence counter only ticks up when several IDs are requested in the same millisecond, and resets to 0 each new millisecond.</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>4,096</b><span>IDs per ms per machine</span></div>
+      <div class="stat"><b>~4.1 million</b><span>IDs per second per machine (theory)</span></div>
+      <div class="stat"><b>10,000</b><span>IDs per second required</span></div>
+    </div>
+    <p>So even a single machine has far more capacity than the 10,000 IDs per second requirement. More machines simply add more capacity, up to 1,024 of them.</p>
+  </section>
+
+  <section>
+    <h2 id="build-an-id">Worked example: building an ID bit by bit</h2>
+    <p>Let us build a real 64-bit ID on <strong>datacenter 3</strong>, <strong>machine 7</strong>, as the <strong>6th ID in that millisecond</strong> (sequence 5, because counting starts at 0), at the same moment as the book's example (timestamp 297616116568).</p>
+    <ol class="steps">
+      <li><strong>Sign bit:</strong> <code>0</code></li>
+      <li><strong>Timestamp (41 bits):</strong> 297616116568 = <code>00100010101001011010011011000101101011000</code></li>
+      <li><strong>Datacenter ID (5 bits):</strong> 3 = <code>00011</code></li>
+      <li><strong>Machine ID (5 bits):</strong> 7 = <code>00111</code></li>
+      <li><strong>Sequence (12 bits):</strong> 5 = <code>000000000101</code></li>
+      <li><strong>Concatenate</strong> them left to right to get 64 bits.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">The assembled 64 bits</div>
+      <div class="tbl-wrap"><table class="tbl">
+        <tr><th>sign</th><th>timestamp (41)</th><th>datacenter (5)</th><th>machine (5)</th><th>sequence (12)</th></tr>
+        <tr><td><code>0</code></td><td><code>00100010101001011010011011000101101011000</code></td><td><code>00011</code></td><td><code>00111</code></td><td><code>000000000101</code></td></tr>
+        <tr><td>0</td><td>297616116568</td><td>3</td><td>7</td><td>5</td></tr>
+      </table></div>
+      <div class="diagram-caption">Reading the whole 64-bit string as one number gives the final ID: 1248292468186050565 (19 decimal digits).</div>
+    </div>
+    <p>In code, "concatenate" is done with shifts and OR. Each value is shifted left by the number of bits to its right:</p>
+<pre><code>timestamp &lt;&lt; 22   = 297616116568 &lt;&lt; 22 = 1248292468185628672   // 22 = 5 + 5 + 12
+datacenter &lt;&lt; 17  = 3 &lt;&lt; 17            =              393216   // 17 = 5 + 12
+machine &lt;&lt; 12     = 7 &lt;&lt; 12            =               28672   // 12
+sequence          = 5                  =                   5
+-------------------------------------------------------------- OR (here same as +)
+id                                     = 1248292468186050565</code></pre>
+    <h3>Decoding an ID back into its parts</h3>
+<pre><code>timestamp  = id &gt;&gt; 22            // 297616116568 -&gt; + epoch -&gt; Apr 09 2020 16:51:31 UTC
+datacenter = (id &gt;&gt; 17) &amp; 0x1F   // 0x1F = 31 = binary 11111 -&gt; 3
+machine    = (id &gt;&gt; 12) &amp; 0x1F   //                         -&gt; 7
+sequence   = id &amp; 0xFFF          // 0xFFF = 4095            -&gt; 5</code></pre>
+    <div class="callout tip"><div class="callout-title">Why this is useful</div>
+      <p>Any snowflake ID tells you when and where it was created, which helps with debugging ("which machine made this bad record?") and lets you fetch "everything after time T" with a simple <code>WHERE id &gt; ...</code> query.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="generator-code">The generator, in pseudocode</h2>
+    <p>The book describes the layout; here is how a generator on one machine typically puts it into practice. Two edge cases matter: the sequence running out within one millisecond, and the clock moving backwards.</p>
+<pre><code>class SnowflakeGenerator:
+    EPOCH          = 1288834974657   # Twitter epoch, ms
+    DATACENTER_BITS = 5
+    MACHINE_BITS    = 5
+    SEQUENCE_BITS   = 12
+    MAX_SEQUENCE    = 4095           # 2^12 - 1
+
+    constructor(datacenterId, machineId):
+        require 0 &lt;= datacenterId &lt;= 31
+        require 0 &lt;= machineId &lt;= 31     # chosen at startup, then fixed
+        this.datacenterId  = datacenterId
+        this.machineId     = machineId
+        this.lastTimestamp = -1
+        this.sequence      = 0
+
+    synchronized nextId():                # one thread at a time on this machine
+        now = currentTimeMillis()
+
+        if now &lt; lastTimestamp:
+            # Clock moved backwards (e.g. NTP correction).
+            # Issuing IDs now could repeat old ones, so wait or fail.
+            if lastTimestamp - now is small: now = waitUntil(lastTimestamp)
+            else: throw ClockMovedBackwardsError
+
+        if now == lastTimestamp:
+            sequence = (sequence + 1) &amp; MAX_SEQUENCE
+            if sequence == 0:
+                # All 4096 values used in this ms: spin until the next ms.
+                now = waitUntilNextMillis(lastTimestamp)
+        else:
+            sequence = 0                  # new millisecond, reset
+
+        lastTimestamp = now
+        return ((now - EPOCH) &lt;&lt; 22)
+             | (datacenterId &lt;&lt; 17)
+             | (machineId &lt;&lt; 12)
+             | sequence</code></pre>
+    <div class="diagram"><div class="diagram-title">Decision flow for nextId()</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Read current time (ms)</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row">
+          <div class="node red">now &lt; last<small>clock went back: wait or error</small></div>
+          <div class="node yellow">now == last<small>sequence + 1; if it wraps to 0, wait for next ms</small></div>
+          <div class="node green">now &gt; last<small>sequence = 0</small></div>
+        </div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node purple">Save last = now; shift and OR the four fields into the ID</div></div>
+      </div>
+      <div class="diagram-caption">The three branches are what keep IDs unique on a single machine; datacenter and machine IDs keep machines apart from each other.</div>
+    </div>
+    <div class="callout info"><div class="callout-title">Scenario: a burst of 5,000 requests in one millisecond</div>
+      <p>IDs 1 to 4096 use sequence 0 to 4095. Request 4097 wraps the sequence to 0 in the same millisecond, which would duplicate the first ID, so the generator waits (well under a millisecond) for the clock to tick and continues with sequence 0 of the next millisecond. Requests are slightly delayed, never duplicated.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="wrap-up">Wrap up: additional talking points</h2>
+    <p>The book closes by noting we settled on snowflake because it supports all our use cases and is scalable in a distributed environment. If there is extra time at the end of the interview, here are additional talking points:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Clock synchronization</h4><p>In our design, we assume ID generation servers have the same clock. This assumption might not be true when a server is running on multiple cores. The same challenge exists in multi-machine scenarios. Solutions to clock synchronization are out of scope, but it is important to understand the problem exists. Network Time Protocol (NTP) is the most popular solution.</p></div>
+      <div class="card yellow"><h4>Section length tuning</h4><p>For example, fewer sequence numbers but more timestamp bits are effective for low-concurrency and long-term applications. An app creating only a few IDs per millisecond does not need 4096 sequence values, and could spend those bits on extending the 69-year lifetime.</p></div>
+      <div class="card green"><h4>High availability</h4><p>Since an ID generator is a mission-critical system, it must be highly available. Every write in the product depends on getting an ID.</p></div>
+    </div>
+    <h3>Section length tuning, with numbers</h3>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Layout</th><th>Timestamp bits</th><th>Lifetime</th><th>Sequence bits</th><th>IDs per ms per machine</th></tr>
+      <tr><td>Standard snowflake</td><td>41</td><td>~69 years</td><td>12</td><td>4096</td></tr>
+      <tr><td>Long-lived, low concurrency</td><td>42</td><td>~139 years</td><td>11</td><td>2048</td></tr>
+      <tr><td>Very long-lived</td><td>43</td><td>~278 years</td><td>10</td><td>1024</td></tr>
+    </table></div>
+    <p>Each bit moved from sequence to timestamp halves the burst capacity and doubles the lifetime. You can make similar trades between datacenter and machine bits (for example 3 bits for 8 datacenters and 7 bits for 128 machines each).</p>
+    <div class="callout warn"><div class="callout-title">Why clock problems are dangerous</div>
+      <p>If NTP adjusts a server's clock backwards by 5 ms, the server will see timestamps it has already used. If it keeps issuing IDs, it can produce duplicates. That is why practical generators detect "clock moved backwards" and refuse or wait, as in the pseudocode above.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="comparison">Comparing the four options</h2>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Requirement</th><th>Multi-master</th><th>UUID</th><th>Ticket server</th><th>Snowflake</th></tr>
+      <tr><td>Unique</td><td>Yes</td><td>Yes (practically)</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Numeric only</td><td>Yes</td><td>No (hex string)</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Fits 64 bits</td><td>Yes</td><td>No (128 bits)</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>Ordered by time</td><td>No (across servers)</td><td>No</td><td>Yes</td><td>Yes</td></tr>
+      <tr><td>10,000+/sec, scalable</td><td>Hard with multiple data centers, adding/removing servers</td><td>Yes</td><td>Limited, single point of failure</td><td>Yes</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <div class="diagram"><div class="diagram-title">Snowflake ID generation in production</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">NTP time servers<small>keep all clocks in sync</small></div><div class="node yellow">Config at startup<small>assigns datacenter ID + machine ID</small></div></div>
+        <div class="arch-down">↓<small>clock sync and fixed IDs</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Datacenter 0</span><div class="node green">Machine 0<small>generator</small></div><div class="node green">Machine 1<small>generator</small></div><div class="node green">... up to 31</div></div>
+          <div class="group"><span class="group-label">Datacenter 1</span><div class="node green">Machine 0<small>generator</small></div><div class="node green">... up to 31</div></div>
+          <div class="group"><span class="group-label">... up to 31</span><div class="node green">...</div></div>
+        </div>
+        <div class="arch-down">↓<small>nextId(): timestamp | dc | machine | seq</small></div>
+        <div class="arch-row"><div class="node accent">Application servers<small>store records with 64-bit, time-sorted IDs</small></div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node db purple">Databases<small>ID is the primary key; newest = largest</small></div></div>
+      </div>
+      <div class="diagram-caption">Generators never talk to each other while creating IDs. Uniqueness comes from the layout; sortability comes from the timestamp in the top bits.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Startup:</strong> each generator machine reads its datacenter ID and machine ID from configuration. These are fixed while running and changed only with careful review.</li>
+      <li><strong>Clocks:</strong> all machines sync their clocks with NTP so timestamps are close across machines.</li>
+      <li><strong>Request:</strong> an application needs an ID (a new tweet, say) and calls the local or nearby generator.</li>
+      <li><strong>Generate:</strong> the generator takes milliseconds since the custom epoch, picks the next sequence number for that millisecond, and packs <code>0 | timestamp | datacenter | machine | sequence</code> into 64 bits.</li>
+      <li><strong>Edge cases:</strong> if 4096 IDs are used in one millisecond, it waits for the next; if the clock jumps backwards, it waits or raises an error.</li>
+      <li><strong>Use:</strong> the ID becomes the record's primary key. Sorting by ID now sorts by creation time.</li>
+      <li><strong>Availability:</strong> because there are many independent generators, losing one machine only removes a little capacity; nothing else stops.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="interview">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Clarify requirements</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Unique? Sortable? Increment by 1 or just by time?</li><li>Numeric only? Length (64 bits)?</li><li>Scale (10,000 IDs per second)?</li></ul>
+      <div class="say">"Let me confirm what the IDs need to be. Must they be unique and sortable? Do they need to increase by exactly 1, or just increase with time? Numeric only? Must they fit in 64 bits? And how many IDs per second at peak?"</div>
+      <div class="say them">"Unique and sortable by time, not necessarily by 1. Numeric, 64 bits, 10,000 per second."</div>
+      <div class="say">"Great. Then a single auto_increment database is out, because it does not scale across servers, and that rules out a few common options too. Let me go through them."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">Propose options and trade-offs</div><div class="iv-time">8–10 min</div></div>
+      <ul><li>Multi-master (step k), UUID, ticket server, snowflake.</li><li>For each: one-line how it works plus the requirement it fails.</li></ul>
+      <div class="say">"Multi-master replication increments by k, the number of servers, but IDs are not time-ordered across servers and adding a server is painful. UUIDs need no coordination but are 128 bits, non-numeric and not time-ordered. A ticket server like Flickr's is simple and numeric, but it is a single point of failure, and multiple ticket servers bring synchronization problems. Twitter's snowflake meets all the requirements, so I'll go with that."</div>
+      <div class="say them">"Aren't UUIDs at risk of collisions?"</div>
+      <div class="say">"Practically no. You would need to generate about a billion UUIDs per second for around 100 years to reach a 50% chance of a single duplicate. The real reasons to reject UUID here are the 128-bit size, non-numeric form and lack of time ordering."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Deep dive into snowflake</div><div class="iv-time">10–15 min</div></div>
+      <ul><li>Draw the 1 / 41 / 5 / 5 / 12 layout.</li><li>Custom epoch, ~69 years, conversion example.</li><li>Datacenter and machine IDs fixed at startup; sequence 4096 per ms.</li><li>Show shift-and-OR assembly.</li></ul>
+      <div class="say">"The 64 bits are split into a sign bit that's always 0, a 41-bit millisecond timestamp since a custom epoch, 5 bits of datacenter ID, 5 bits of machine ID and a 12-bit sequence. The timestamp in the top bits makes IDs time-sortable. 41 bits of milliseconds lasts about 69 years. Datacenter and machine IDs are set at startup, giving up to 1,024 generators, and the sequence allows 4,096 IDs per millisecond per machine, which is way over 10,000 per second."</div>
+      <div class="say them">"What happens if one machine needs more than 4096 IDs in a millisecond?"</div>
+      <div class="say">"When the sequence wraps past 4095, the generator waits until the next millisecond and resets the sequence to 0. Requests are delayed by under a millisecond, never duplicated. If that happens a lot, I'd add machines or retune the bit lengths."</div>
+      <div class="say them">"What if the server's clock goes backwards?"</div>
+      <div class="say">"That is dangerous because we could reuse timestamps. The generator remembers the last timestamp it used. If the current time is earlier, it waits until it catches up if the gap is small, or refuses to generate and raises an alert if it is large. We keep clocks aligned with NTP to make this rare."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Clock synchronization (NTP).</li><li>Section length tuning.</li><li>High availability.</li></ul>
+      <div class="say">"A few more points: we assume generator clocks are in sync, which isn't guaranteed across cores or machines, so NTP matters. The section lengths can be tuned; a low-concurrency, long-lived app could use fewer sequence bits and more timestamp bits. And since every write depends on IDs, the generator is mission-critical and must be highly available, which snowflake helps with because generators are independent."</div>
+      <div class="say them">"How would you assign machine IDs safely?"</div>
+      <div class="say">"They're chosen at startup and kept fixed. I'd store them in configuration with a review process for changes, because two machines with the same datacenter and machine ID could produce duplicate IDs."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Jumping straight to snowflake</div>
+      <p>The interviewer wants to see you reason about alternatives. Briefly cover multi-master, UUID and the ticket server and say which requirement each fails before choosing snowflake.</p>
+    </div>
+    <div class="callout danger"><div class="callout-title">Forgetting the sequence overflow case</div>
+      <p>Saying "the sequence resets every millisecond" is half the story. Explain what happens when it hits 4095 within one millisecond: wait for the next millisecond.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Ignoring clocks</div>
+      <p>Snowflake relies on clocks. Mention NTP and what the generator does if the clock moves backwards.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Using the Unix epoch without thinking</div>
+      <p>Counting from 1970 wastes decades of the 41-bit range. Use a custom epoch close to launch to delay overflow.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Claiming IDs are strictly ordered across machines</div>
+      <p>Snowflake IDs are ordered by time, but two machines in the same millisecond, or with slightly different clocks, produce IDs whose order does not exactly match real time. They are roughly time-sorted, which is what the requirements ask for.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Getting the bit counts wrong</div>
+      <p>1 + 41 + 5 + 5 + 12 = 64. If your sections do not add up to 64, the interviewer will notice.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. Why doesn't a database's auto_increment work for a distributed system?</summary><div><p>A single database server is not large enough to handle all traffic and is a single point of failure. If you use many databases, each counts independently from 1 and IDs collide. Coordinating them with minimal delay is challenging.</p></div></details>
+      <details><summary>2. In multi-master replication with 3 servers, what IDs does server 2 generate, and what is the main ordering problem?</summary><div><p>Server 2 generates 2, 5, 8, 11... (step k = 3). IDs do not go up with time across servers: a busy server can be far ahead of a quiet one, so a newer record may have a smaller ID. It is also hard to add or remove servers and to scale across data centers.</p></div></details>
+      <details><summary>3. Name three reasons UUID fails our requirements.</summary><div><p>It is 128 bits (we need 64), it is not ordered by time, and it can be non-numeric. Collisions are not the problem.</p></div></details>
+      <details><summary>4. What is the main weakness of the ticket server and why is adding a second one not trivial?</summary><div><p>It is a single point of failure: if it goes down, every system that needs IDs is affected. Adding more ticket servers introduces data synchronization challenges, because they must avoid giving out the same numbers.</p></div></details>
+      <details><summary>5. List the five sections of a snowflake ID and their sizes.</summary><div><p>Sign bit (1, always 0), timestamp (41, ms since custom epoch), datacenter ID (5), machine ID (5), sequence number (12). Total 64.</p></div></details>
+      <details><summary>6. An ID's timestamp section in decimal is 297616116568. When was it generated, using Twitter's epoch?</summary><div><p>Add the epoch: 297616116568 + 1288834974657 = 1586451091225 ms since the Unix epoch, which is Apr 09 2020 16:51:31 UTC.</p></div></details>
+      <details><summary>7. Why does 41 bits give about 69 years?</summary><div><p>The maximum is 2<sup>41</sup>-1 = 2,199,023,255,551 ms. Divided by 1000 (seconds), 3600 (hours), 24 (days) and 365 (years) that is about 69 years. A custom epoch near today's date delays overflow.</p></div></details>
+      <details><summary>8. How many generator machines and how many IDs per millisecond per machine does the standard layout support?</summary><div><p>32 datacenters x 32 machines = 1,024 machines. 2<sup>12</sup> = 4,096 IDs per millisecond per machine.</p></div></details>
+      <details><summary>9. Your app creates about 10 IDs per second but must run for 150 years. How might you change the layout?</summary><div><p>Use section length tuning: move bits from the sequence to the timestamp. With 42 timestamp bits (about 139 years) or 43 (about 278 years), and 10-11 sequence bits, which is still far more than 10 IDs per second needs. Alternatively choose a later epoch.</p></div></details>
+      <details><summary>10. NTP moves a generator's clock back by 3 ms. What could go wrong, and what should the generator do?</summary><div><p>It might reuse timestamps it already issued, and with the sequence reset it could produce duplicate IDs. It should compare the current time to the last timestamp it used and, if earlier, wait until time catches up (for small gaps) or refuse and alert (for large gaps).</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>auto_increment fails in distributed systems: one DB cannot handle the traffic; many DBs collide.</li>
+      <li>Requirements: unique, numerical, 64-bit, ordered by date, 10,000+ IDs per second.</li>
+      <li>Multi-master: step by k servers. Not time-ordered across servers; hard with multiple DCs and adding/removing servers.</li>
+      <li>UUID: 128 bits, no coordination, easy to scale. Too long, not time-ordered, non-numeric. 50% chance of one duplicate only after 1 billion per second for ~100 years.</li>
+      <li>Ticket server (Flickr): central auto_increment. Simple and numeric, but a single point of failure; multiple servers need synchronization.</li>
+      <li>Snowflake layout: 1 sign | 41 timestamp | 5 datacenter | 5 machine | 12 sequence = 64 bits.</li>
+      <li>Timestamp = ms since custom epoch; Twitter's is 1288834974657 (Nov 04 2010 01:42:54 UTC). Lasts 2<sup>41</sup>-1 ms, about 69 years.</li>
+      <li>Decode: timestamp = id &gt;&gt; 22, add epoch, convert to UTC.</li>
+      <li>Datacenter and machine IDs chosen at startup and fixed; 32 x 32 = 1,024 machines.</li>
+      <li>Sequence: 4,096 per ms per machine; reset each ms; on overflow wait for next ms.</li>
+      <li>Build: <code>(ts &lt;&lt; 22) | (dc &lt;&lt; 17) | (machine &lt;&lt; 12) | seq</code>.</li>
+      <li>Wrap-up: clock sync (NTP), section length tuning, high availability.</li>
+    </ul></div>
+  </section>
+
+</main>
+<script src="assets/app.js"></script></body></html>

@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 1: Scale From Zero to Millions of Users</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="1">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 1</div><h1>Scale From Zero to Millions of Users</h1>
+    <p class="lead">Every large website started as one small computer. This chapter walks you through how a system grows, one problem at a time, from a single server serving a handful of users to a multi-data-center setup serving millions. Each step adds exactly one new building block and explains which pain it removes.</p>
+    <div class="meta"><span class="tag">~35 min read</span><span class="tag">Beginner</span><span class="tag">Prerequisites: none (knowing what a website and a database are helps)</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>Designing a system that supports millions of users is hard, and nobody gets it right in one go. It is a journey of continuous refinement. You build something simple, wait for it to break (or predict where it will break), and then add the one piece that fixes that weakness.</p>
+    <p>This chapter is the foundation of the whole book. Almost every later chapter (rate limiter, chat system, news feed, YouTube...) reuses the building blocks introduced here: <strong>load balancers, replicated databases, caches, CDNs, stateless servers, message queues, multiple data centers and sharding</strong>. If you understand why each one exists, you can design almost anything.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Think of a small restaurant that grows into a chain. On day one, a single cook takes orders, cooks, washes dishes and keeps the recipe book (one server doing everything). When customers multiply, the owner hires more cooks and a host at the door who sends each customer to a free table (load balancer). The recipe book gets photocopied so many cooks can read it at once, but only the head chef may change the original (database replication). Popular dishes are pre-prepared and kept warm (cache). A frozen-dessert supplier opens kiosks across town so people do not have to travel to the main kitchen (CDN). Eventually the chain opens a second kitchen in another city (multiple data centers), and finally splits its giant customer ledger into several smaller ledgers by customer surname (sharding).</p>
+    </div>
+    <div class="cards">
+      <div class="card sky"><h4>The method</h4><p>Start with the simplest thing that works. Find the bottleneck or single point of failure. Add one component to fix it. Repeat.</p></div>
+      <div class="card green"><h4>The goal</h4><p>Handle more traffic (scalability), survive failures (availability and reliability), and stay fast (low latency).</p></div>
+      <div class="card purple"><h4>Why it matters for interviews</h4><p>Interviewers expect you to know these components by heart and to justify each one with the problem it solves, not just name it.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Server</dt><dd>A computer that waits for requests over the network and sends back responses. A <em>web server</em> runs your application code.</dd>
+      <dt>Client</dt><dd>The thing that sends requests: a web browser or a mobile app.</dd>
+      <dt>DNS (Domain Name System)</dt><dd>The internet's phone book. Turns a name like <code>api.mysite.com</code> into an IP address like <code>15.125.23.214</code>. Usually a paid service run by a third party, not something you host yourself.</dd>
+      <dt>IP address</dt><dd>A numeric address that identifies a machine on a network. A <em>public IP</em> is reachable from the internet; a <em>private IP</em> is reachable only by machines inside the same network.</dd>
+      <dt>HTTP</dt><dd>HyperText Transfer Protocol: the language browsers and servers use to ask for and send web pages and data.</dd>
+      <dt>HTML / JSON</dt><dd>HTML is the format of web pages that browsers display. JSON (JavaScript Object Notation) is a simple text format for data, commonly used by APIs that mobile apps call.</dd>
+      <dt>API</dt><dd>Application Programming Interface: a set of URLs (endpoints) that programs call to read or change data, e.g. <code>GET /users/12</code>.</dd>
+      <dt>Relational database (RDBMS / SQL)</dt><dd>Stores data in tables with rows and columns, supports joins across tables. Examples: MySQL, Oracle, PostgreSQL.</dd>
+      <dt>NoSQL database</dt><dd>A non-relational database. Four families: key-value stores, graph stores, column stores, document stores. Examples: CouchDB, Neo4j, Cassandra, HBase, Amazon DynamoDB. Joins are generally not supported.</dd>
+      <dt>Vertical scaling (scale up)</dt><dd>Making one machine more powerful: more CPU, RAM, disk.</dd>
+      <dt>Horizontal scaling (scale out)</dt><dd>Adding more machines to share the work.</dd>
+      <dt>Load balancer (LB)</dt><dd>A component that sits in front of a group of servers and spreads incoming traffic evenly among them.</dd>
+      <dt>Failover</dt><dd>Automatically switching to a backup component when the main one fails.</dd>
+      <dt>Single point of failure (SPOF)</dt><dd>Any part of the system whose failure stops the whole system from working.</dd>
+      <dt>Replication</dt><dd>Keeping copies of the same data on multiple database servers.</dd>
+      <dt>Master / slave (primary / replica)</dt><dd>In replication, the master accepts writes; slaves receive copies of the data from the master and serve reads only.</dd>
+      <dt>Latency</dt><dd>How long a single request takes, end to end.</dd>
+      <dt>Cache</dt><dd>A temporary, fast storage (usually in memory) that keeps results of expensive work or frequently used data so you can serve them quickly next time.</dd>
+      <dt>Cache hit / miss</dt><dd>A hit means the data was found in the cache. A miss means it was not, so you must go to the database.</dd>
+      <dt>TTL (Time-To-Live)</dt><dd>How long a cached item is allowed to live before it is considered stale and removed or refreshed.</dd>
+      <dt>Eviction</dt><dd>Removing items from a full cache to make room for new ones. Policies: LRU, LFU, FIFO.</dd>
+      <dt>CDN (Content Delivery Network)</dt><dd>A network of servers spread around the world that store copies of static files (images, videos, CSS, JavaScript) close to users.</dd>
+      <dt>Static vs dynamic content</dt><dd>Static content is the same for everyone (a logo image). Dynamic content is generated per request (your personal news feed).</dd>
+      <dt>Origin server</dt><dd>The "real" source of a file that a CDN copies from, such as your web server or Amazon S3.</dd>
+      <dt>State / session data</dt><dd>Information a server remembers about a user between requests, e.g. "this user is logged in" or a profile picture choice.</dd>
+      <dt>Stateful vs stateless server</dt><dd>A stateful server keeps user state in its own memory. A stateless server keeps none; state lives in a shared data store.</dd>
+      <dt>Sticky sessions</dt><dd>A load balancer feature that always sends a given user to the same server. Needed for stateful servers; adds overhead.</dd>
+      <dt>Data center (DC)</dt><dd>A building full of servers. Big companies run several in different regions.</dd>
+      <dt>geoDNS</dt><dd>A DNS service that returns different IP addresses depending on where the user is located, so users are routed to the nearest data center.</dd>
+      <dt>Message queue</dt><dd>A durable, in-memory buffer that stores messages so one component (producer) can hand off work to another (consumer) asynchronously.</dd>
+      <dt>Asynchronous</dt><dd>"Do it later, do not wait." The sender continues without waiting for the work to finish.</dd>
+      <dt>Metrics</dt><dd>Numbers collected over time about the system: CPU usage, requests per second, daily active users, revenue.</dd>
+      <dt>CI (Continuous Integration)</dt><dd>Automatically building and testing every code change so problems are caught early.</dd>
+      <dt>Sharding</dt><dd>Splitting a large database into smaller pieces (shards) that live on different servers. Each shard has the same schema but different rows.</dd>
+      <dt>Sharding key (partition key)</dt><dd>The column(s) used to decide which shard a row belongs to, e.g. <code>user_id</code>.</dd>
+      <dt>Resharding</dt><dd>Moving data around when you change the number of shards or the way data is split.</dd>
+      <dt>Hotspot / celebrity problem</dt><dd>One shard getting far more traffic than the others, e.g. because it holds a very popular user.</dd>
+      <dt>Denormalization</dt><dd>Deliberately storing duplicate data so a query can be answered from one table without joins.</dd>
+      <dt>QPS</dt><dd>Queries (requests) per second.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="single-server-setup">Stage 1: Single server setup</h2>
+    <p>A journey of a thousand miles begins with a single step. At the very start, <strong>everything runs on one server</strong>: the web application, the database, and the cache. This is perfectly fine for a hobby project or a brand-new product with a few users.</p>
+    <div class="diagram"><div class="diagram-title">Single server setup</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Web browser<small>www.mysite.com</small></div><div class="node sky">Mobile app<small>api.mysite.com</small></div></div>
+        <div class="arch-down">↓<small>1. "What is the IP of api.mysite.com?"</small></div>
+        <div class="arch-row"><div class="node yellow">DNS<small>returns 15.125.23.214</small></div></div>
+        <div class="arch-down">↓<small>2. HTTP request sent directly to that IP</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">One machine (15.125.23.214)</span><div class="node accent">Web app</div><div class="node db green">Database</div><div class="node purple">Cache</div></div></div>
+      </div>
+      <div class="diagram-caption">Users reach the single server by its domain name. The server runs the app, the database and the cache all together.</div>
+    </div>
+
+    <h3>How a request flows, step by step</h3>
+    <ol class="steps">
+      <li><strong>User types a domain name.</strong> They access the website through a domain name such as <code>api.mysite.com</code>. DNS is normally a paid service provided by a third party, not hosted on our servers.</li>
+      <li><strong>DNS returns an IP address.</strong> The browser or app asks DNS, "where is api.mysite.com?" and gets back an IP address, for example <code>15.125.23.214</code>.</li>
+      <li><strong>An HTTP request is sent to that IP.</strong> Now that the client knows the address, it sends an HTTP request directly to the web server.</li>
+      <li><strong>The server responds.</strong> The web server returns HTML pages (for browsers) or JSON (for mobile apps) for rendering.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Request flow (sequence)</div>
+      <svg class="dg" viewBox="0 0 640 300">
+        <defs><marker id="c1-arr-flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="20" width="140" height="40" rx="8" class="a"/><text x="90" y="45" text-anchor="middle">User device</text>
+        <rect x="250" y="20" width="140" height="40" rx="8" class="y"/><text x="320" y="45" text-anchor="middle">DNS</text>
+        <rect x="480" y="20" width="140" height="40" rx="8" class="g"/><text x="550" y="45" text-anchor="middle">Web server</text>
+        <line x1="90" y1="60" x2="90" y2="285" class="sm" stroke-dasharray="4 4"/>
+        <line x1="320" y1="60" x2="320" y2="285" class="sm" stroke-dasharray="4 4"/>
+        <line x1="550" y1="60" x2="550" y2="285" class="sm" stroke-dasharray="4 4"/>
+        <line x1="90" y1="95" x2="318" y2="95" marker-end="url(#c1-arr-flow)"/><text x="205" y="88" text-anchor="middle" class="sm">1. resolve api.mysite.com</text>
+        <line x1="320" y1="135" x2="92" y2="135" marker-end="url(#c1-arr-flow)"/><text x="205" y="128" text-anchor="middle" class="sm">2. 15.125.23.214</text>
+        <line x1="90" y1="185" x2="548" y2="185" marker-end="url(#c1-arr-flow)"/><text x="320" y="178" text-anchor="middle" class="sm">3. HTTP GET /users/12</text>
+        <line x1="550" y1="240" x2="92" y2="240" marker-end="url(#c1-arr-flow)"/><text x="320" y="233" text-anchor="middle" class="sm">4. HTML page or JSON response</text>
+      </svg>
+      <div class="diagram-caption">Two round trips: first to DNS for the address, then to the web server for the content.</div>
+    </div>
+
+    <h3>Where does the traffic come from?</h3>
+    <p>The web server gets traffic from two sources:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Web application</h4><p>Uses a combination of <strong>server-side languages</strong> (Java, Python, etc.) to handle business logic and storage, and <strong>client-side languages</strong> (HTML and JavaScript) for presentation in the browser.</p></div>
+      <div class="card pink"><h4>Mobile application</h4><p>Talks to the server using HTTP. The response format is usually <strong>JSON</strong> because it is simple and lightweight.</p></div>
+    </div>
+    <p>An example API request and JSON response:</p>
+<pre><code>GET /users/12   -- retrieve the user object with id = 12
+
+{
+  "id": 12,
+  "firstName": "John",
+  "lastName": "Smith",
+  "address": {
+    "streetAddress": "21 2nd Street",
+    "city": "New York",
+    "state": "NY",
+    "postalCode": 10021
+  },
+  "phoneNumbers": ["212 555-1234", "646 555-4567"]
+}</code></pre>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros of a single server</h4><ul><li>Very simple to build, deploy and debug.</li><li>Cheap.</li><li>No network calls between components, so it is fast at low traffic.</li></ul></div>
+      <div class="cons"><h4>Cons</h4><ul><li>If the server dies, the whole site is down (single point of failure).</li><li>The app and database compete for the same CPU and memory.</li><li>There is a hard ceiling on how much one machine can handle.</li></ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="database">Stage 2: Separate the database</h2>
+    <p>As the user base grows, one server is not enough. The first split is to move the database onto its own server. Now we have <strong>two tiers</strong>: a web tier (handles web and mobile traffic) and a data tier (the database). Separating them allows each to be <strong>scaled independently</strong>: you can give the database a machine with lots of disk and RAM, and the web server a machine with more CPU.</p>
+    <div class="diagram"><div class="diagram-title">Web tier and data tier separated</div>
+      <div class="flow">
+        <div class="node sky">Users<small>web + mobile</small></div><div class="arrow">→</div>
+        <div class="node accent">Web server<small>web tier</small></div><div class="arrow">→<small>read / write / update</small></div>
+        <div class="node db green">Database<small>data tier</small></div>
+      </div>
+      <div class="diagram-caption">The web server talks to a separate database server. Each can now grow on its own.</div>
+    </div>
+
+    <h3>Which database to use?</h3>
+    <p>You choose between a traditional <strong>relational database</strong> and a <strong>non-relational (NoSQL) database</strong>.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th></th><th>Relational (SQL)</th><th>Non-relational (NoSQL)</th></tr>
+      <tr><td>Examples</td><td>MySQL, Oracle, PostgreSQL</td><td>CouchDB, Neo4j, Cassandra, HBase, Amazon DynamoDB</td></tr>
+      <tr><td>Data model</td><td>Tables and rows</td><td>Key-value, graph, column, or document stores</td></tr>
+      <tr><td>Joins</td><td>Yes, SQL join across tables</td><td>Generally not supported</td></tr>
+      <tr><td>Track record</td><td>Over 40 years; works well for most cases</td><td>Newer; built for specific needs</td></tr>
+    </table></div>
+    <p>The book's advice: <strong>relational databases are the best choice for most developers</strong> because they have been around for over 40 years and historically they have worked well. If they do not fit your use case, explore beyond them. A non-relational database might be the right choice if:</p>
+    <ul>
+      <li>Your application requires <strong>super-low latency</strong>.</li>
+      <li>Your data is <strong>unstructured</strong>, or you do not have any relational data.</li>
+      <li>You only need to <strong>serialize and deserialize data</strong> (JSON, XML, YAML, etc.), i.e. store and fetch blobs.</li>
+      <li>You need to store a <strong>massive amount of data</strong>.</li>
+    </ul>
+    <div class="callout tip"><div class="callout-title">Beginner tip</div><p>"Serialize" means turning an in-memory object into text or bytes so it can be stored or sent. If all your app ever does is "save this user's settings blob" and "load it back by user id", a key-value NoSQL store is a natural fit.</p></div>
+  </section>
+
+  <section>
+    <h2 id="vertical-vs-horizontal-scaling">Vertical vs horizontal scaling</h2>
+    <p>When traffic grows, you have two ways to get more capacity.</p>
+    <div class="diagram"><div class="diagram-title">Scale up vs scale out</div>
+      <svg class="dg" viewBox="0 0 640 230">
+        <text x="160" y="22" text-anchor="middle">Vertical (scale up)</text>
+        <rect x="120" y="150" width="80" height="50" rx="8" class="a"/><text x="160" y="180" text-anchor="middle" class="sm">small</text>
+        <rect x="100" y="40" width="120" height="100" rx="8" class="g"/><text x="160" y="85" text-anchor="middle">Bigger</text><text x="160" y="105" text-anchor="middle" class="sm">more CPU / RAM</text>
+        <text x="480" y="22" text-anchor="middle">Horizontal (scale out)</text>
+        <rect x="340" y="80" width="80" height="60" rx="8" class="a"/><text x="380" y="115" text-anchor="middle" class="sm">server 1</text>
+        <rect x="440" y="80" width="80" height="60" rx="8" class="a"/><text x="480" y="115" text-anchor="middle" class="sm">server 2</text>
+        <rect x="540" y="80" width="80" height="60" rx="8" class="a"/><text x="580" y="115" text-anchor="middle" class="sm">server 3</text>
+        <text x="480" y="175" text-anchor="middle" class="sm">add more machines of the same size</text>
+        <line x1="320" y1="30" x2="320" y2="215" class="sm" stroke-dasharray="4 4"/>
+      </svg>
+      <div class="diagram-caption">Vertical scaling makes one machine bigger. Horizontal scaling adds more machines.</div>
+    </div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Vertical scaling: good when</h4><ul><li>Traffic is low. Its main advantage is <strong>simplicity</strong>: no code changes, no new components.</li></ul></div>
+      <div class="cons"><h4>Vertical scaling: serious limits</h4><ul><li><strong>Hard limit</strong>: you cannot add unlimited CPU and memory to one server.</li><li><strong>No failover or redundancy</strong>: if that one server goes down, the website goes down with it.</li></ul></div>
+    </div>
+    <p>Because of these limits, <strong>horizontal scaling is more desirable for large-scale applications</strong>. But with several servers, how do users know which one to talk to? And with our current design, users connect directly to the web server: if it is offline, users cannot reach the site; if too many users arrive at once, responses get slow or fail. The answer is a load balancer.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div><p>Vertical scaling is buying a faster delivery truck. Horizontal scaling is buying more trucks. Eventually no faster truck exists, and if your one truck breaks, nothing gets delivered. A fleet keeps going even if one truck is in the shop.</p></div>
+  </section>
+
+  <section>
+    <h2 id="load-balancer">Stage 3: Load balancer</h2>
+    <p>A <strong>load balancer</strong> evenly distributes incoming traffic among the web servers that are defined in a load-balanced set.</p>
+    <div class="diagram"><div class="diagram-title">Adding a load balancer</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Users<small>web + mobile</small></div></div>
+        <div class="arch-down">↓<small>DNS returns the LB's public IP: 88.88.88.1</small></div>
+        <div class="arch-row"><div class="node yellow">Load balancer<small>public IP 88.88.88.1</small></div></div>
+        <div class="arch-down">↓<small>private IPs (internal network only)</small></div>
+        <div class="arch-row"><div class="node accent">Server 1<small>192.168.0.2</small></div><div class="node accent">Server 2<small>192.168.0.3</small></div></div>
+      </div>
+      <div class="diagram-caption">Users connect only to the load balancer's public IP. The web servers have private IPs and cannot be reached directly from the internet.</div>
+    </div>
+    <h3>How it works</h3>
+    <ol class="steps">
+      <li><strong>Users connect to the LB's public IP.</strong> DNS now returns the load balancer's address, not a web server's. The web servers are unreachable directly by clients anymore.</li>
+      <li><strong>The LB talks to servers via private IPs.</strong> A private IP is reachable only between servers in the same network; it is not reachable over the internet. This improves security.</li>
+      <li><strong>Traffic is spread evenly.</strong> Each request goes to one of the servers in the pool.</li>
+    </ol>
+    <h3>What problems it fixes</h3>
+    <div class="cards">
+      <div class="card green"><h4>Failover</h4><p>If server 1 goes offline, all traffic is routed to server 2. The website stays up. We can then add a new healthy server to the pool.</p></div>
+      <div class="card sky"><h4>Handling growth</h4><p>If traffic grows rapidly and two servers are not enough, just add more servers to the pool. The LB automatically starts sending requests to them.</p></div>
+      <div class="card purple"><h4>Security</h4><p>Only the LB is exposed to the internet. Web servers hide behind private IPs.</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Failover: server 1 goes down</div>
+      <svg class="dg" viewBox="0 0 600 220">
+        <defs><marker id="c1-arr-lb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="230" y="20" width="140" height="44" rx="8" class="y"/><text x="300" y="47" text-anchor="middle">Load balancer</text>
+        <rect x="80" y="150" width="160" height="50" rx="8" class="r"/><text x="160" y="172" text-anchor="middle">Server 1</text><text x="160" y="190" text-anchor="middle" class="sm r">OFFLINE</text>
+        <rect x="360" y="150" width="160" height="50" rx="8" class="g"/><text x="440" y="172" text-anchor="middle">Server 2</text><text x="440" y="190" text-anchor="middle" class="sm g">100% of traffic</text>
+        <line x1="270" y1="64" x2="175" y2="148" class="r" stroke-dasharray="6 5"/>
+        <text x="190" y="105" text-anchor="middle" class="sm r">health check fails</text>
+        <line x1="330" y1="64" x2="430" y2="148" class="g" marker-end="url(#c1-arr-lb)"/>
+      </svg>
+      <div class="diagram-caption">The load balancer notices server 1 is unhealthy and sends everything to server 2.</div>
+    </div>
+    <p>The web tier now looks good. But there is still only <strong>one database</strong>, which does not support failover or redundancy. Database replication solves that.</p>
+  </section>
+
+  <section>
+    <h2 id="database-replication">Stage 4: Database replication</h2>
+    <p>Quoted from Wikipedia in the book: "Database replication can be used in many database management systems, usually with a master/slave relationship between the original (master) and the copies (slaves)."</p>
+    <ul>
+      <li>The <strong>master</strong> database generally only supports <strong>write</strong> operations. All data-modifying commands (insert, delete, update) go to the master.</li>
+      <li>A <strong>slave</strong> database gets copies of the data from the master and only supports <strong>read</strong> operations.</li>
+      <li>Most applications need a much higher ratio of reads to writes, so there are usually <strong>more slaves than masters</strong>.</li>
+    </ul>
+    <div class="diagram"><div class="diagram-title">Master / slave replication</div>
+      <svg class="dg" viewBox="0 0 640 260">
+        <defs><marker id="c1-arr-rep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="250" y="20" width="140" height="44" rx="8" class="a"/><text x="320" y="47" text-anchor="middle">Web servers</text>
+        <rect x="60" y="170" width="140" height="56" rx="8" class="g"/><text x="130" y="194" text-anchor="middle">Master DB</text><text x="130" y="213" text-anchor="middle" class="sm">writes</text>
+        <rect x="300" y="170" width="120" height="56" rx="8" class="s"/><text x="360" y="194" text-anchor="middle">Slave DB 1</text><text x="360" y="213" text-anchor="middle" class="sm">reads</text>
+        <rect x="460" y="170" width="120" height="56" rx="8" class="s"/><text x="520" y="194" text-anchor="middle">Slave DB 2</text><text x="520" y="213" text-anchor="middle" class="sm">reads</text>
+        <line x1="270" y1="64" x2="150" y2="168" marker-end="url(#c1-arr-rep)" class="g"/><text x="185" y="110" text-anchor="middle" class="sm g">writes</text>
+        <line x1="330" y1="64" x2="360" y2="168" marker-end="url(#c1-arr-rep)" class="s"/>
+        <line x1="370" y1="64" x2="510" y2="168" marker-end="url(#c1-arr-rep)" class="s"/><text x="470" y="110" text-anchor="middle" class="sm s">reads</text>
+        <path d="M200,198 L298,198" marker-end="url(#c1-arr-rep)" class="y" stroke-dasharray="5 4"/>
+        <path d="M200,240 C300,255 420,255 518,228" marker-end="url(#c1-arr-rep)" class="y" stroke-dasharray="5 4" fill="none"/>
+        <text x="250" y="190" text-anchor="middle" class="sm y">copy</text><text x="360" y="252" text-anchor="middle" class="sm y">replicate</text>
+      </svg>
+      <div class="diagram-caption">Writes go to the master. The master copies changes to the slaves. Reads are spread across the slaves.</div>
+    </div>
+    <h3>Advantages</h3>
+    <div class="cards">
+      <div class="card green"><h4>Better performance</h4><p>All writes and updates happen on the master; reads are distributed across slaves. More queries can be processed in parallel.</p></div>
+      <div class="card sky"><h4>Reliability</h4><p>If one database server is destroyed by a natural disaster (typhoon, earthquake), data is still preserved. Data is replicated across multiple locations, so you do not lose it.</p></div>
+      <div class="card purple"><h4>High availability</h4><p>Because data lives on several machines, the website keeps working even if one database goes offline: you access data from another server.</p></div>
+    </div>
+    <h3>What if a database goes offline?</h3>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Scenario</th><th>What happens</th></tr>
+      <tr><td>Only <strong>one slave</strong> exists and it goes offline</td><td>Read operations are temporarily directed to the master. As soon as the problem is found, a new slave replaces the old one.</td></tr>
+      <tr><td><strong>Multiple slaves</strong>, one goes offline</td><td>Reads are redirected to the other healthy slaves. A new database server replaces the old one.</td></tr>
+      <tr><td>The <strong>master</strong> goes offline</td><td>A slave is <strong>promoted</strong> to be the new master. All database operations are temporarily executed on that new master. A new slave replaces the old one for data replication immediately.</td></tr>
+    </table></div>
+    <div class="callout warn"><div class="callout-title">The catch with promoting a slave</div><p>In production, promoting a new master is more complicated: the data in a slave might <strong>not be up to date</strong> (replication takes time). Missing data must be recovered by running data recovery scripts. Other approaches like <strong>multi-masters</strong> and <strong>circular replication</strong> could help, but they are more complicated and beyond the scope of the book.</p></div>
+    <div class="diagram"><div class="diagram-title">Design so far: load balancer + database replication</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Users</div><div class="node yellow">DNS</div></div>
+        <div class="arch-down">↓<small>to LB public IP</small></div>
+        <div class="arch-row"><div class="node yellow">Load balancer</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node accent">Server 1</div><div class="node accent">Server 2</div></div>
+        <div class="arch-down">↓<small>writes to master, reads from slaves</small></div>
+        <div class="arch-row"><div class="node db green">Master DB</div><div class="arrow">→<small>replicate</small></div><div class="node db sky">Slave DB</div></div>
+      </div>
+      <div class="diagram-caption">A user gets the LB's IP from DNS, connects to the LB, the request goes to server 1 or server 2, which reads from a slave and writes to the master.</div>
+    </div>
+    <p>Now that the web and data tiers are solid, it is time to improve <strong>load and response time</strong>. We do that with a cache and a CDN.</p>
+  </section>
+
+  <section>
+    <h2 id="cache">Stage 5: Cache</h2>
+    <p>A <strong>cache</strong> is a temporary storage area that stores the result of expensive responses or frequently accessed data in memory so that subsequent requests are served more quickly. Every time a new web page loads, one or more database calls are executed. Calling the database repeatedly hurts performance. A cache fixes this.</p>
+    <h3>The cache tier</h3>
+    <p>The cache tier is a temporary data store layer, <strong>much faster than the database</strong>. Benefits of having a separate cache tier:</p>
+    <ul><li>Better system performance.</li><li>Reduced database workload.</li><li>The cache tier can be scaled independently.</li></ul>
+    <div class="diagram"><div class="diagram-title">Read-through cache</div>
+      <svg class="dg" viewBox="0 0 640 230">
+        <defs><marker id="c1-arr-cache" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="30" y="90" width="140" height="50" rx="8" class="a"/><text x="100" y="120" text-anchor="middle">Web server</text>
+        <rect x="320" y="20" width="140" height="50" rx="8" class="p"/><text x="390" y="50" text-anchor="middle">Cache</text>
+        <rect x="320" y="160" width="140" height="50" rx="8" class="g"/><text x="390" y="190" text-anchor="middle">Database</text>
+        <line x1="170" y1="100" x2="318" y2="48" marker-end="url(#c1-arr-cache)"/><text x="215" y="62" text-anchor="middle" class="sm">1. check cache</text>
+        <text x="540" y="40" text-anchor="middle" class="sm g">2a. hit: return</text><text x="540" y="56" text-anchor="middle" class="sm g">data immediately</text>
+        <line x1="170" y1="128" x2="318" y2="182" marker-end="url(#c1-arr-cache)" class="r" stroke-dasharray="5 4"/><text x="210" y="175" text-anchor="middle" class="sm r">2b. miss: query DB</text>
+        <line x1="390" y1="158" x2="390" y2="72" marker-end="url(#c1-arr-cache)" class="y"/><text x="470" y="120" text-anchor="middle" class="sm y">3. store in cache</text>
+      </svg>
+      <div class="diagram-caption">The web server first checks the cache. On a hit it returns data straight away. On a miss it queries the database, stores the result in the cache, and returns it to the client.</div>
+    </div>
+    <p>This caching strategy is called a <strong>read-through cache</strong>. Other strategies exist depending on data type, size and access patterns. Interacting with cache servers is simple because most provide APIs for common languages. A typical Memcached example:</p>
+<pre><code>SECONDS = 1
+cache.set('myKey', 'hi there', 3600 * SECONDS)   # store for 1 hour (TTL = 3600 s)
+cache.get('myKey')                               # returns 'hi there' until it expires</code></pre>
+    <h3>Considerations for using a cache</h3>
+    <div class="cards">
+      <div class="card sky"><h4>Decide when to use it</h4><p>Use a cache when data is <strong>read frequently but modified infrequently</strong>. Cached data lives in volatile memory, so a cache server is not ideal for persisting data. If a cache server restarts, all data in memory is lost. Important data should be saved in persistent data stores.</p></div>
+      <div class="card yellow"><h4>Expiration policy</h4><p>Once cached data expires, it is removed. Without a policy, data stays forever. Not too short (the system reloads from the DB too often) and not too long (data becomes stale).</p></div>
+      <div class="card pink"><h4>Consistency</h4><p>Keeping the data store and cache in sync. Inconsistency happens because data-modifying operations on the DB and cache are not in a single transaction. Across multiple regions, this is a big challenge (see Facebook's paper "Scaling Memcache at Facebook").</p></div>
+      <div class="card red"><h4>Mitigating failures</h4><p>A single cache server is a potential <strong>SPOF</strong>. Recommendation: multiple cache servers across different data centers. Also <strong>overprovision</strong> memory by a certain percentage to give a buffer as usage grows.</p></div>
+      <div class="card purple"><h4>Eviction policy</h4><p>When the cache is full, adding items may evict existing ones. <strong>LRU</strong> (least recently used) is the most popular. Others: <strong>LFU</strong> (least frequently used) and <strong>FIFO</strong> (first in, first out).</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Cache as a single point of failure</div>
+      <div class="flow">
+        <div class="node accent">Web server 1</div>
+        <div class="node accent">Web server 2</div>
+        <div class="arrow">→</div>
+        <div class="node red">Only one cache<small>if it dies, all traffic hits DB</small></div>
+      </div>
+      <div class="diagram-caption">If every web server depends on a single cache node, that node is a SPOF. Use multiple cache servers.</div>
+    </div>
+    <h3>Eviction policies explained with an example</h3>
+    <p>Imagine a tiny cache that holds 3 items. It contains A, B, C (A was added first). Recent accesses: A was read 10 times, B once, C 5 times, and B was the most recently read. Now D must be added.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Policy</th><th>Rule</th><th>Who is evicted?</th></tr>
+      <tr><td>LRU</td><td>Remove the item not used for the longest time</td><td>Whichever of A or C was touched longest ago</td></tr>
+      <tr><td>LFU</td><td>Remove the item used the fewest times</td><td>B (used once)</td></tr>
+      <tr><td>FIFO</td><td>Remove the oldest inserted item</td><td>A (added first, even though it is popular)</td></tr>
+    </table></div>
+    <div class="callout key"><div class="callout-title">Key idea</div><p>A cache trades <strong>freshness</strong> for <strong>speed</strong>. You accept that data might be a little out of date in exchange for not hitting the database every time.</p></div>
+  </section>
+
+  <section>
+    <h2 id="cdn">Stage 6: Content delivery network (CDN)</h2>
+    <p>A <strong>CDN</strong> is a network of geographically dispersed servers used to deliver <strong>static content</strong>: images, videos, CSS, JavaScript files, etc. (Dynamic content caching, which caches HTML pages based on request path, query strings, cookies and headers, is a newer idea and beyond this chapter.)</p>
+    <p>At a high level: when a user visits a website, a CDN server <strong>closest to the user</strong> delivers static content. The further users are from CDN servers, the slower the site loads. For example, if CDN servers are in San Francisco, users in Los Angeles get content faster than users in Europe.</p>
+    <h3>How a CDN works</h3>
+    <div class="diagram"><div class="diagram-title">CDN request flow</div>
+      <svg class="dg" viewBox="0 0 660 270">
+        <defs><marker id="c1-arr-cdn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="40" width="110" height="44" rx="8" class="a"/><text x="75" y="67" text-anchor="middle">User A</text>
+        <rect x="20" y="190" width="110" height="44" rx="8" class="a"/><text x="75" y="217" text-anchor="middle">User B</text>
+        <rect x="270" y="110" width="120" height="50" rx="8" class="s"/><text x="330" y="140" text-anchor="middle">CDN</text>
+        <rect x="510" y="110" width="130" height="50" rx="8" class="g"/><text x="575" y="132" text-anchor="middle">Origin</text><text x="575" y="150" text-anchor="middle" class="sm">web server / S3</text>
+        <line x1="130" y1="62" x2="268" y2="120" marker-end="url(#c1-arr-cdn)"/><text x="175" y="70" text-anchor="middle" class="sm">1. get image.png</text>
+        <line x1="390" y1="125" x2="508" y2="125" marker-end="url(#c1-arr-cdn)" class="r" stroke-dasharray="5 4"/><text x="450" y="115" text-anchor="middle" class="sm r">2. miss: fetch</text>
+        <line x1="508" y1="148" x2="392" y2="148" marker-end="url(#c1-arr-cdn)" class="y"/><text x="450" y="172" text-anchor="middle" class="sm y">3. image + TTL</text>
+        <text x="330" y="95" text-anchor="middle" class="sm">4. cache, return to A</text>
+        <line x1="130" y1="212" x2="268" y2="152" marker-end="url(#c1-arr-cdn)"/><text x="175" y="250" text-anchor="middle" class="sm">5. get image.png</text>
+        <text x="330" y="190" text-anchor="middle" class="sm g">6. hit (TTL not expired)</text>
+      </svg>
+      <div class="diagram-caption">The first user triggers a fetch from the origin. Later users get the cached copy from the CDN until the TTL expires.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>User A requests image.png</strong> using a URL provided by the CDN provider, e.g. <code>https://mysite.cloudfront.net/logo.jpg</code> (Amazon CloudFront) or <code>https://mysite.akamai.com/image-manager/img/logo.jpg</code> (Akamai).</li>
+      <li><strong>If the CDN does not have it</strong> in its cache, the CDN requests the file from the <strong>origin</strong>, which can be a web server or online storage like Amazon S3.</li>
+      <li><strong>The origin returns image.png</strong> to the CDN, including an optional HTTP header <strong>Time-to-Live (TTL)</strong> that describes how long the image is cached.</li>
+      <li><strong>The CDN caches the image</strong> and returns it to User A. It stays cached until the TTL expires.</li>
+      <li><strong>User B sends a request</strong> for the same image.</li>
+      <li><strong>The image is returned from the cache</strong> as long as the TTL has not expired.</li>
+    </ol>
+    <h3>Considerations of using a CDN</h3>
+    <div class="cards">
+      <div class="card yellow"><h4>Cost</h4><p>CDNs are run by third parties and you are charged for data transfers in and out. Caching infrequently used assets gives no significant benefit, so consider moving them out of the CDN.</p></div>
+      <div class="card sky"><h4>Appropriate cache expiry</h4><p>For time-sensitive content, set the expiry carefully. Too long and content may no longer be fresh. Too short and you cause repeated reloading from origin servers.</p></div>
+      <div class="card red"><h4>CDN fallback</h4><p>Consider how your site copes with CDN failure. During a temporary CDN outage, clients should detect the problem and request resources from the origin.</p></div>
+      <div class="card purple"><h4>Invalidating files</h4><p>Remove a file before it expires by (1) invalidating the CDN object using APIs provided by CDN vendors, or (2) <strong>object versioning</strong>: serve a different version by adding a parameter to the URL, e.g. <code>image.png?v=2</code>.</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Design after adding cache and CDN</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Users</div><div class="arrow">→<small>static assets</small></div><div class="node sky">CDN<small>JS, CSS, images, video</small></div></div>
+        <div class="arch-down">↓<small>dynamic requests</small></div>
+        <div class="arch-row"><div class="node yellow">Load balancer</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node accent">Server 1</div><div class="node accent">Server 2</div><div class="arrow">↔</div><div class="node purple">Cache</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node db green">Master DB</div><div class="node db sky">Slave DB</div></div>
+      </div>
+      <div class="diagram-caption">Static assets are no longer served by web servers; they come from the CDN for better performance. The database load is lightened by caching data.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="stateless-web-tier">Stage 7: Stateless web tier</h2>
+    <p>Now it is time to scale the web tier horizontally. To do that, we need to <strong>move state (for instance user session data) out of the web tier</strong>. A good practice is to store session data in a persistent storage such as a relational database or NoSQL. Each web server in the cluster can then access state data from the database. This is called a <strong>stateless web tier</strong>.</p>
+    <h3>Stateful architecture (the problem)</h3>
+    <p>A stateful server remembers client data (state) from one request to the next. In the example below, User A's session data and profile image are stored on Server 1. To authenticate User A, HTTP requests <strong>must</strong> be routed to Server 1. If a request goes to Server 2, authentication fails because Server 2 does not have User A's session data.</p>
+    <div class="diagram"><div class="diagram-title">Stateful: each user is tied to one server</div>
+      <svg class="dg" viewBox="0 0 640 220">
+        <defs><marker id="c1-arr-sf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="40" y="20" width="120" height="40" rx="8" class="a"/><text x="100" y="45" text-anchor="middle">User A</text>
+        <rect x="260" y="20" width="120" height="40" rx="8" class="a"/><text x="320" y="45" text-anchor="middle">User B</text>
+        <rect x="480" y="20" width="120" height="40" rx="8" class="a"/><text x="540" y="45" text-anchor="middle">User C</text>
+        <rect x="30" y="140" width="140" height="60" rx="8" class="y"/><text x="100" y="165" text-anchor="middle">Server 1</text><text x="100" y="185" text-anchor="middle" class="sm">session of A</text>
+        <rect x="250" y="140" width="140" height="60" rx="8" class="y"/><text x="320" y="165" text-anchor="middle">Server 2</text><text x="320" y="185" text-anchor="middle" class="sm">session of B</text>
+        <rect x="470" y="140" width="140" height="60" rx="8" class="y"/><text x="540" y="165" text-anchor="middle">Server 3</text><text x="540" y="185" text-anchor="middle" class="sm">session of C</text>
+        <line x1="100" y1="60" x2="100" y2="138" marker-end="url(#c1-arr-sf)"/>
+        <line x1="320" y1="60" x2="320" y2="138" marker-end="url(#c1-arr-sf)"/>
+        <line x1="540" y1="60" x2="540" y2="138" marker-end="url(#c1-arr-sf)"/>
+        <line x1="130" y1="60" x2="290" y2="138" class="r" stroke-dasharray="5 4"/><text x="245" y="95" text-anchor="middle" class="sm r">A to Server 2 = fails</text>
+      </svg>
+      <div class="diagram-caption">Every request from the same client must go to the same server. Routing User A to Server 2 fails authentication.</div>
+    </div>
+    <p>This can be done with <strong>sticky sessions</strong> in most load balancers, but this adds overhead. Adding or removing servers is much more difficult with this approach, and handling server failures is a challenge.</p>
+    <h3>Stateless architecture (the fix)</h3>
+    <p>HTTP requests from users can be sent to <strong>any</strong> web server, which fetches state data from a <strong>shared data store</strong>. State is kept out of web servers. A stateless system is simpler, more robust, and scalable.</p>
+    <div class="diagram"><div class="diagram-title">Stateless: any server can handle any user</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">User A</div><div class="node sky">User B</div><div class="node sky">User C</div></div>
+        <div class="arch-down">↓<small>any request can go to any server</small></div>
+        <div class="arch-row"><div class="node accent">Server 1</div><div class="node accent">Server 2</div><div class="node accent">Server 3</div></div>
+        <div class="arch-down">↓<small>fetch state</small></div>
+        <div class="arch-row"><div class="node db purple">Shared storage<small>sessions (NoSQL / Redis / RDBMS)</small></div></div>
+      </div>
+      <div class="diagram-caption">Session data lives in a shared store. Web servers hold no user state, so they are interchangeable.</div>
+    </div>
+    <p>The shared data store could be a relational database, Memcached/Redis, or NoSQL. The book chooses <strong>NoSQL because it is easy to scale</strong>. Once state is removed, <strong>autoscaling</strong> becomes possible: web servers are added or removed automatically based on traffic load.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div><p>A stateful bank teller keeps your file in their desk drawer, so you must always queue at that one teller. A stateless bank keeps every file in a central records room. Any free teller can serve you, and if a teller goes home sick, nobody is stuck.</p></div>
+  </section>
+
+  <section>
+    <h2 id="data-centers">Stage 8: Multiple data centers</h2>
+    <p>As your website grows and attracts a significant number of international users, supporting multiple data centers is crucial to improve availability and provide a better user experience across wider geographical areas.</p>
+    <div class="diagram"><div class="diagram-title">Two data centers with geoDNS</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Users</div><div class="arrow">→</div><div class="node yellow">geoDNS<small>routes by location</small></div></div>
+        <div class="arch-down">↓<small>x% to US-East, (100 - x)% to US-West</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">DC1: US-East</span><div class="node yellow">LB</div><div class="node accent">Web servers</div><div class="node db green">DB</div><div class="node purple">Cache</div></div>
+          <div class="group"><span class="group-label">DC2: US-West</span><div class="node yellow">LB</div><div class="node accent">Web servers</div><div class="node db green">DB</div><div class="node purple">Cache</div></div>
+        </div>
+      </div>
+      <div class="diagram-caption">In normal operation, users are geoDNS-routed (also called geo-routed) to the closest data center, with a split of x% in US-East and (100 - x)% in US-West.</div>
+    </div>
+    <p><strong>geoDNS</strong> is a DNS service that allows domain names to be resolved to IP addresses based on the location of a user. In the event of any significant data center outage, <strong>we direct all traffic to a healthy data center</strong>. For example, if DC2 (US-West) is offline, 100% of traffic is routed to DC1 (US-East).</p>
+    <div class="diagram"><div class="diagram-title">Data center failover</div>
+      <div class="flow">
+        <div class="node sky">All users</div><div class="arrow">→<small>100%</small></div>
+        <div class="node green">DC1 US-East<small>healthy</small></div>
+        <div class="arrow">✕</div>
+        <div class="node red">DC2 US-West<small>offline</small></div>
+      </div>
+      <div class="diagram-caption">When one data center fails, geoDNS sends everyone to the remaining healthy one.</div>
+    </div>
+    <h3>Technical challenges of multi-data-center setups</h3>
+    <div class="cards">
+      <div class="card sky"><h4>Traffic redirection</h4><p>Effective tools are needed to direct traffic to the correct data center. geoDNS can direct traffic to the nearest DC depending on where a user is located.</p></div>
+      <div class="card pink"><h4>Data synchronization</h4><p>Users from different regions could use different local databases or caches. In failover cases, traffic might be routed to a DC where data is unavailable. A common strategy is to <strong>replicate data across multiple data centers</strong>. Netflix's study shows how it implements asynchronous multi-data center replication.</p></div>
+      <div class="card yellow"><h4>Test and deployment</h4><p>With a multi-DC setup, it is important to test your website/application at different locations. Automated deployment tools are vital to keep services consistent across all data centers.</p></div>
+    </div>
+    <p>To further scale, we need to <strong>decouple</strong> different components of the system so they can be scaled independently. Messaging queues are a key strategy used by many real-world distributed systems for this.</p>
+  </section>
+
+  <section>
+    <h2 id="message-queue">Stage 9: Message queue</h2>
+    <p>A <strong>message queue</strong> is a durable component, stored in memory, that supports <strong>asynchronous communication</strong>. It serves as a buffer and distributes asynchronous requests.</p>
+    <p>The basic architecture is simple. Input services, called <strong>producers/publishers</strong>, create messages and publish them to a message queue. Other services or servers, called <strong>consumers/subscribers</strong>, connect to the queue and perform actions defined by the messages.</p>
+    <div class="diagram"><div class="diagram-title">Producer, queue, consumer</div>
+      <div class="flow">
+        <div class="node accent">Producer<small>publishes</small></div><div class="arrow">→<small>publish</small></div>
+        <div class="node yellow">Message queue<small>[msg][msg][msg]</small></div><div class="arrow">→<small>consume</small></div>
+        <div class="node green">Consumer<small>subscribes</small></div>
+      </div>
+      <div class="diagram-caption">The producer drops messages in the queue and moves on. The consumer pulls them out and processes them at its own pace.</div>
+    </div>
+    <h3>Why decoupling matters</h3>
+    <p>Decoupling makes the message queue a preferred architecture for building a scalable and reliable application:</p>
+    <ul>
+      <li>The <strong>producer can post a message when the consumer is unavailable</strong> to process it.</li>
+      <li>The <strong>consumer can read messages even when the producer is unavailable</strong>.</li>
+      <li>Producer and consumer can be <strong>scaled independently</strong>.</li>
+    </ul>
+    <h3>Example: photo processing</h3>
+    <p>Your app supports photo customization: cropping, sharpening, blurring, etc. These tasks take time to complete. Web servers publish photo processing jobs to the message queue. Photo processing workers pick up jobs from the queue and asynchronously perform the customization tasks.</p>
+    <div class="diagram"><div class="diagram-title">Photo processing with a queue</div>
+      <svg class="dg" viewBox="0 0 660 220">
+        <defs><marker id="c1-arr-mq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="40" width="130" height="40" rx="8" class="a"/><text x="85" y="65" text-anchor="middle">Web server 1</text>
+        <rect x="20" y="130" width="130" height="40" rx="8" class="a"/><text x="85" y="155" text-anchor="middle">Web server 2</text>
+        <rect x="230" y="80" width="200" height="50" rx="8" class="y"/><text x="330" y="102" text-anchor="middle">Queue</text><text x="330" y="120" text-anchor="middle" class="sm">crop | blur | sharpen</text>
+        <rect x="510" y="20" width="130" height="40" rx="8" class="g"/><text x="575" y="45" text-anchor="middle">Worker 1</text>
+        <rect x="510" y="85" width="130" height="40" rx="8" class="g"/><text x="575" y="110" text-anchor="middle">Worker 2</text>
+        <rect x="510" y="150" width="130" height="40" rx="8" class="g"/><text x="575" y="175" text-anchor="middle">Worker 3</text>
+        <line x1="150" y1="60" x2="228" y2="95" marker-end="url(#c1-arr-mq)"/>
+        <line x1="150" y1="150" x2="228" y2="118" marker-end="url(#c1-arr-mq)"/>
+        <line x1="430" y1="95" x2="508" y2="42" marker-end="url(#c1-arr-mq)"/>
+        <line x1="430" y1="105" x2="508" y2="105" marker-end="url(#c1-arr-mq)"/>
+        <line x1="430" y1="118" x2="508" y2="168" marker-end="url(#c1-arr-mq)"/>
+        <text x="330" y="205" text-anchor="middle" class="sm">queue grows: add workers; queue empty: remove workers</text>
+      </svg>
+      <div class="diagram-caption">Producers (web servers) and consumers (photo workers) are scaled independently.</div>
+    </div>
+    <p>When the queue becomes large, more workers are added to reduce processing time. If the queue is empty most of the time, the number of workers can be reduced.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div><p>A coffee shop cashier takes your order, writes it on a cup, and puts the cup in a line for the baristas. The cashier does not wait for your drink to be made before taking the next order. If the cup line gets long, the manager adds a barista.</p></div>
+  </section>
+
+  <section>
+    <h2 id="logging-metrics-automation">Stage 10: Logging, metrics, automation</h2>
+    <p>For a small website on a few servers, logging, metrics and automation are good practices but not a necessity. Once your site grows to serve a large business, investing in these tools is essential.</p>
+    <div class="cards">
+      <div class="card sky"><h4>Logging</h4><p>Monitoring error logs is important because it helps identify errors and problems. You can monitor logs per server, or use tools to <strong>aggregate them to a centralized service</strong> for easy search and viewing.</p></div>
+      <div class="card green"><h4>Metrics</h4><p>Collecting different types of metrics helps gain business insights and understand the health of the system.</p></div>
+      <div class="card purple"><h4>Automation</h4><p>When a system gets big and complex, build or use automation tools to improve productivity. <strong>Continuous integration</strong> automatically verifies each code check-in, so teams detect problems early. Automating build, test and deploy improves developer productivity significantly.</p></div>
+    </div>
+    <h3>Useful metrics (from the book)</h3>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Level</th><th>Examples</th></tr>
+      <tr><td>Host level</td><td>CPU, memory, disk I/O, etc.</td></tr>
+      <tr><td>Aggregated level</td><td>Performance of the entire database tier, cache tier, etc.</td></tr>
+      <tr><td>Key business metrics</td><td>Daily active users, retention, revenue, etc.</td></tr>
+    </table></div>
+    <div class="diagram"><div class="diagram-title">Design with message queue and tools added</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Users</div><div class="node yellow">DNS</div><div class="node sky">CDN</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="group"><span class="group-label">DC1</span><div class="node yellow">LB</div><div class="node accent">Web servers</div><div class="node purple">Cache</div><div class="node db green">DBs</div></div></div>
+        <div class="arch-down">↓<small>publish jobs</small></div>
+        <div class="arch-row"><div class="node yellow">Message queue</div><div class="arrow">→</div><div class="node green">Workers</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node teal">Logging</div><div class="node teal">Metrics</div><div class="node teal">Monitoring</div><div class="node teal">Automation</div></div>
+      </div>
+      <div class="diagram-caption">The design now includes a message queue for loose coupling and failure resilience, plus logging, monitoring, metrics and automation tools. Only one data center is shown for space.</div>
+    </div>
+    <p>As data grows every day, your database gets more overloaded. It is time to scale the data tier.</p>
+  </section>
+
+  <section>
+    <h2 id="database-scaling">Stage 11: Database scaling</h2>
+    <p>There are two broad approaches: <strong>vertical scaling</strong> and <strong>horizontal scaling</strong>.</p>
+    <h3>Vertical scaling of the database</h3>
+    <p>Also known as scaling up: adding more power (CPU, RAM, DISK, etc.) to an existing machine. There are some powerful database servers. According to Amazon RDS, you can get a database server with <strong>24 TB of RAM</strong>. This kind of server can store and handle lots of data. For example, stackoverflow.com in 2013 had over 10 million monthly unique visitors, but it only had <strong>1 master database</strong>.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Why it is tempting</h4><ul><li>Simple: no application changes.</li><li>Huge machines exist.</li></ul></div>
+      <div class="cons"><h4>Serious drawbacks</h4><ul><li>You can add more CPU, RAM, etc., but there are <strong>hardware limits</strong>. With a large user base, one server is not enough.</li><li><strong>Greater risk of single point of failure.</strong></li><li><strong>High overall cost.</strong> Powerful servers are much more expensive.</li></ul></div>
+    </div>
+    <h3>Horizontal scaling: sharding</h3>
+    <p>Horizontal scaling, also known as <strong>sharding</strong>, is the practice of adding more servers. Sharding separates large databases into smaller, more easily managed parts called <strong>shards</strong>. Each shard shares the same schema, though the actual data on each shard is unique to the shard.</p>
+    <p>The book's example: user data is allocated to a database server based on user IDs. Any time you access data, a hash function finds the corresponding shard. Here, <code>user_id % 4</code> is used as the hash function. If the result equals 0, shard 0 stores and fetches the data; if it equals 1, shard 1, and so on.</p>
+    <div class="diagram"><div class="diagram-title">Sharding users by user_id % 4</div>
+      <svg class="dg" viewBox="0 0 660 260">
+        <defs><marker id="c1-arr-shard" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="230" y="15" width="200" height="50" rx="8" class="a"/><text x="330" y="37" text-anchor="middle">Application</text><text x="330" y="55" text-anchor="middle" class="sm">shard = user_id % 4</text>
+        <rect x="20" y="150" width="140" height="90" rx="8" class="g"/><text x="90" y="172" text-anchor="middle">Shard 0</text><text x="90" y="195" text-anchor="middle" class="sm">user_id 0, 4, 8</text><text x="90" y="213" text-anchor="middle" class="sm">12, 16 ...</text>
+        <rect x="180" y="150" width="140" height="90" rx="8" class="s"/><text x="250" y="172" text-anchor="middle">Shard 1</text><text x="250" y="195" text-anchor="middle" class="sm">user_id 1, 5, 9</text><text x="250" y="213" text-anchor="middle" class="sm">13, 17 ...</text>
+        <rect x="340" y="150" width="140" height="90" rx="8" class="y"/><text x="410" y="172" text-anchor="middle">Shard 2</text><text x="410" y="195" text-anchor="middle" class="sm">user_id 2, 6, 10</text><text x="410" y="213" text-anchor="middle" class="sm">14, 18 ...</text>
+        <rect x="500" y="150" width="140" height="90" rx="8" class="p"/><text x="570" y="172" text-anchor="middle">Shard 3</text><text x="570" y="195" text-anchor="middle" class="sm">user_id 3, 7, 11</text><text x="570" y="213" text-anchor="middle" class="sm">15, 19 ...</text>
+        <line x1="260" y1="65" x2="95" y2="148" marker-end="url(#c1-arr-shard)"/>
+        <line x1="300" y1="65" x2="250" y2="148" marker-end="url(#c1-arr-shard)"/>
+        <line x1="360" y1="65" x2="410" y2="148" marker-end="url(#c1-arr-shard)"/>
+        <line x1="400" y1="65" x2="565" y2="148" marker-end="url(#c1-arr-shard)"/>
+      </svg>
+      <div class="diagram-caption">Every shard has the same "users" table schema, but different rows. Example: user_id 10 gives 10 % 4 = 2, so it lives on shard 2.</div>
+    </div>
+    <h3>Choosing the sharding key</h3>
+    <p>The most important factor is the choice of the <strong>sharding key</strong> (also called a partition key). It consists of one or more columns that determine how data is distributed. In the example, <code>user_id</code> is the sharding key. A sharding key lets you retrieve and modify data efficiently by routing queries to the correct database. When choosing one, a key criterion is to pick a key that can <strong>evenly distribute data</strong>.</p>
+    <h3>The challenges sharding introduces</h3>
+    <div class="cards">
+      <div class="card yellow"><h4>Resharding data</h4><p>Needed when (1) a single shard can no longer hold more data due to rapid growth, or (2) certain shards experience <strong>shard exhaustion</strong> faster than others due to uneven data distribution. You must update the sharding function and move data around. <strong>Consistent hashing</strong> (Chapter 5) is a commonly used technique to solve this.</p></div>
+      <div class="card red"><h4>Celebrity (hotspot) problem</h4><p>Excessive access to a specific shard can overload a server. Imagine data for Katy Perry, Justin Bieber and Lady Gaga all ending up on the same shard. For social applications, that shard will be overwhelmed with reads. A fix: allocate a shard for each celebrity, and each shard might even require further partitioning.</p></div>
+      <div class="card purple"><h4>Join and de-normalization</h4><p>Once a database is sharded across servers, it is hard to perform join operations across shards. A common workaround is to <strong>de-normalize</strong> the database so queries can be performed in a single table.</p></div>
+    </div>
+    <h3>Why modulo makes resharding painful: a worked example</h3>
+    <p>Suppose you grow from 4 shards to 5 and keep the simple formula <code>shard = user_id % N</code>.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>user_id</th><th>% 4 (old shard)</th><th>% 5 (new shard)</th><th>Moves?</th></tr>
+      <tr><td>8</td><td>0</td><td>3</td><td>Yes</td></tr>
+      <tr><td>9</td><td>1</td><td>4</td><td>Yes</td></tr>
+      <tr><td>10</td><td>2</td><td>0</td><td>Yes</td></tr>
+      <tr><td>20</td><td>0</td><td>0</td><td>No</td></tr>
+      <tr><td>21</td><td>1</td><td>1</td><td>No</td></tr>
+    </table></div>
+    <p>Most keys change shard, meaning a huge data migration. This is exactly the pain that consistent hashing reduces (covered in Chapter 5).</p>
+    <div class="diagram"><div class="diagram-title">The celebrity problem</div>
+      <div class="flow">
+        <div class="node sky">Millions of fans</div><div class="arrow">→<small>overloaded</small></div>
+        <div class="node red">Shard 2<small>Katy Perry, Justin Bieber, Lady Gaga</small></div>
+        <div class="node green">Shard 0<small>quiet</small></div><div class="node green">Shard 1<small>quiet</small></div>
+      </div>
+      <div class="diagram-caption">An even split of users is not an even split of traffic. Give each hot key its own shard.</div>
+    </div>
+    <div class="callout info"><div class="callout-title">Moving non-relational work out</div><p>The book's final design also moves some non-relational functionalities to a NoSQL data store to reduce database load. Many use cases of NoSQL are covered in the book's further reading ("Which websites use NoSQL").</p></div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together: millions of users and beyond</h2>
+    <p>Scaling a system is an iterative process. Iterating on what you learned in this chapter gets you far. More fine-tuning and new strategies are needed beyond millions of users (for example, optimizing the system and decoupling it into even smaller services).</p>
+    <div class="diagram"><div class="diagram-title">Final architecture</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node sky">Web browser</div><div class="node sky">Mobile app</div><div class="arrow">→</div><div class="node yellow">geoDNS</div><div class="node sky">CDN<small>static assets</small></div></div>
+        <div class="arch-down">↓<small>routed to nearest data center</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Data center 1</span>
+            <div class="node yellow">Load balancer</div>
+            <div class="node accent">Web servers<small>stateless, autoscaled</small></div>
+            <div class="node purple">Cache tier</div>
+            <div class="node db green">Sharded DBs<small>+ replicas</small></div>
+            <div class="node db pink">NoSQL<small>sessions</small></div>
+          </div>
+          <div class="group"><span class="group-label">Data center 2</span>
+            <div class="node yellow">Load balancer</div>
+            <div class="node accent">Web servers</div>
+            <div class="node purple">Cache tier</div>
+            <div class="node db green">Sharded DBs</div>
+            <div class="node db pink">NoSQL</div>
+          </div>
+        </div>
+        <div class="arch-down">↓<small>async jobs</small></div>
+        <div class="arch-row"><div class="node yellow">Message queue</div><div class="arrow">→</div><div class="node green">Workers</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node teal">Logging</div><div class="node teal">Metrics</div><div class="node teal">Monitoring</div><div class="node teal">Automation / CI</div></div>
+      </div>
+      <div class="diagram-caption">Every tier has redundancy, state is shared, static content is at the edge, data is sharded and replicated, slow work is queued, and everything is observed.</div>
+    </div>
+    <h3>Walkthrough: a user uploads a photo</h3>
+    <ol class="steps">
+      <li><strong>DNS.</strong> The mobile app resolves <code>api.mysite.com</code>. geoDNS sees the user is on the US West coast and returns the public IP of the US-West data center's load balancer.</li>
+      <li><strong>Static assets.</strong> The app's images, CSS and JavaScript are already coming from the nearest CDN edge, not from our servers.</li>
+      <li><strong>Load balancer.</strong> The request arrives at the LB, which forwards it over a private IP to any healthy web server.</li>
+      <li><strong>Stateless web server.</strong> The server reads the user's session from the shared NoSQL store to confirm they are logged in. Any server could have done this.</li>
+      <li><strong>Cache, then database.</strong> To show the user's profile, the server checks the cache first. On a miss it computes the shard (<code>user_id % N</code>), reads from a replica of that shard, and populates the cache.</li>
+      <li><strong>Write.</strong> The photo's metadata is written to the master of the user's shard; the master replicates to its slaves (and to the other data center).</li>
+      <li><strong>Queue.</strong> The server publishes a "resize and filter this photo" job to the message queue and immediately replies "upload received" to the user.</li>
+      <li><strong>Workers.</strong> Photo workers pick up the job asynchronously, process the image, and store the results.</li>
+      <li><strong>Observe.</strong> Every step emits logs and metrics; dashboards and alerts watch for errors, and automation adds web servers or workers when load climbs.</li>
+    </ol>
+    <h3>The book's summary: how to scale to millions of users</h3>
+    <div class="cards">
+      <div class="card sky"><h4>1. Keep the web tier stateless</h4><p>Store sessions in a shared store so any server can handle any request.</p></div>
+      <div class="card green"><h4>2. Build redundancy at every tier</h4><p>No single points of failure: multiple servers, replicas, cache nodes.</p></div>
+      <div class="card purple"><h4>3. Cache data as much as you can</h4><p>Serve hot, rarely-changing data from memory.</p></div>
+      <div class="card sky"><h4>4. Support multiple data centers</h4><p>For availability and lower latency worldwide.</p></div>
+      <div class="card yellow"><h4>5. Host static assets in CDN</h4><p>Closer to users, less load on your servers.</p></div>
+      <div class="card pink"><h4>6. Scale your data tier by sharding</h4><p>Split data horizontally across servers.</p></div>
+      <div class="card teal"><h4>7. Split tiers into individual services</h4><p>Decouple with message queues so parts scale independently.</p></div>
+      <div class="card red"><h4>8. Monitor and automate</h4><p>Monitor your system and use automation tools.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="interview">How to answer this in an interview</h2>
+    <p>The question usually sounds like "Design a system that can scale to millions of users" or it is hidden inside another problem ("How would you scale this?"). Your job is to show the evolution and justify every component.</p>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Clarify scope and scale</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Ask: web, mobile, or both? Expected users now and in a year? Read-heavy or write-heavy? Global or one region?</li><li>Write down the answers; they drive every later decision.</li></ul>
+      <div class="say">"Before I draw anything, I want to confirm a few things. Are we serving both web and mobile clients? Roughly how many daily users should we plan for, and is the traffic mostly reads? Are users global or in one region?"</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">Start simple, then remove single points of failure</div><div class="iv-time">5–10 min</div></div>
+      <ul><li>Draw one server with DNS. Then split web and data tiers.</li><li>Add a load balancer and multiple web servers. Add master/slave replication.</li></ul>
+      <div class="say">"I'll start with one server so we agree on the request flow: DNS gives the client an IP, the client sends HTTP, and gets HTML or JSON back. The obvious problem is that one machine is a single point of failure, so I'll separate the database, put a load balancer with a public IP in front of two or more web servers on private IPs, and replicate the database: writes go to the master, reads to slaves."</div>
+      <div class="say them">"What happens if the master database dies?"</div>
+      <div class="say">"A slave gets promoted to be the new master and we add a new slave. The risk is that the slave may be slightly behind, so some recent writes could be missing and we'd run recovery scripts. If that's unacceptable, multi-master or synchronous replication are options, but they add complexity."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Improve latency: cache and CDN</div><div class="iv-time">5–8 min</div></div>
+      <ul><li>Cache for read-heavy, rarely-modified data. Mention TTL, consistency, eviction, and multiple cache nodes.</li><li>CDN for static assets. Mention TTL, cost, fallback, and versioned URLs.</li></ul>
+      <div class="say">"Most of our traffic is reads, so I'll add a read-through cache in front of the database with a TTL and LRU eviction, running several cache nodes so it is not a SPOF. Images, CSS and JavaScript go to a CDN so users fetch them from a nearby edge."</div>
+      <div class="say them">"How do you deal with stale data in the cache?"</div>
+      <div class="say">"I'd pick a TTL that matches how fresh the data must be, and on writes either delete the cache key or update it after writing to the database. The cache and DB writes aren't one transaction, so there can be a short window of inconsistency; for data that must be exact, like account balances, I'd read straight from the database."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Scale out: stateless tier, data centers, queues</div><div class="iv-time">5–10 min</div></div>
+      <ul><li>Move sessions to a shared NoSQL store; enable autoscaling.</li><li>geoDNS plus two data centers with replicated data; failover story.</li><li>Message queue for slow, asynchronous work.</li></ul>
+      <div class="say">"To autoscale web servers, they must be stateless, so sessions go to a shared NoSQL store. For global users and disaster tolerance I'd run two data centers behind geoDNS and replicate data asynchronously between them. Slow tasks like photo processing go through a message queue so web servers reply immediately and workers scale on queue length."</div>
+      <div class="say them">"Why not just use sticky sessions?"</div>
+      <div class="say">"They work, but they add overhead at the load balancer, make adding or removing servers harder, and when a server dies its users lose their sessions. A shared session store avoids all three."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">5</div><div class="iv-title">Scale the data tier and wrap up</div><div class="iv-time">5 min</div></div>
+      <ul><li>Vertical first if it is enough, then sharding with a well-chosen key.</li><li>Name the challenges: resharding, hotspots, cross-shard joins.</li><li>Close with monitoring, logging and automation.</li></ul>
+      <div class="say">"When one database can't keep up, I'd shard by user_id, since most queries are per user and it spreads data evenly. The trade-offs are resharding as we grow, which consistent hashing helps with, hotspots for celebrity accounts, which may need dedicated shards, and no cross-shard joins, so I'd denormalize hot queries."</div>
+      <div class="say them">"How would you pick a sharding key for an e-commerce orders table?"</div>
+      <div class="say">"I'd look at the most common query. If it's 'show my orders', sharding by customer_id keeps a customer's orders on one shard and spreads load evenly. I'd avoid something like order date, because all of today's writes would land on one shard and create a hotspot."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Jumping straight to the final diagram</div><p>Drawing sharded multi-region microservices in the first minute tells the interviewer nothing about your reasoning. Show the evolution and tie each component to the problem it solves.</p></div>
+    <div class="callout danger"><div class="callout-title">Using the cache as the source of truth</div><p>Cache memory is volatile. If the cache server restarts, its data is gone. Important data must live in a persistent database.</p></div>
+    <div class="callout warn"><div class="callout-title">Forgetting that new components can be SPOFs</div><p>A single load balancer, a single cache node, or a single message queue broker is just a new single point of failure. Mention redundancy for each.</p></div>
+    <div class="callout warn"><div class="callout-title">Keeping sessions on web servers and then "autoscaling"</div><p>Autoscaling only works cleanly if the web tier is stateless. If sessions live in server memory, removing a server logs users out.</p></div>
+    <div class="callout warn"><div class="callout-title">Choosing a sharding key that creates hotspots</div><p>Keys like timestamps or country can concentrate traffic on one shard. Pick a key that evenly distributes data and matches the main query pattern.</p></div>
+    <div class="callout warn"><div class="callout-title">Ignoring replication lag</div><p>Saying "promote a slave" without mentioning that it may be behind the master misses a key trade-off.</p></div>
+    <div class="callout warn"><div class="callout-title">Putting everything on a CDN</div><p>CDNs charge for data transfer. Rarely accessed assets bring little benefit; keep the CDN for popular static content.</p></div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. Describe what happens, step by step, when a user opens api.mysite.com on a single-server setup.</summary><div><p>The client asks DNS (a third-party service) for the IP of the domain, DNS returns an IP such as 15.125.23.214, the client sends an HTTP request to that IP, and the web server returns HTML (browser) or JSON (mobile app). Two lookups: one for the address, one for the content.</p></div></details>
+      <details><summary>2. When would you pick a NoSQL database over a relational one?</summary><div><p>When you need super-low latency, the data is unstructured or non-relational, you only need to serialize/deserialize data (JSON, XML, YAML), or you must store a massive amount of data. Otherwise relational is the safe default because of its long track record.</p></div></details>
+      <details><summary>3. Why is horizontal scaling preferred for large systems?</summary><div><p>Vertical scaling hits a hard hardware limit and has no failover or redundancy: if the one server dies, the site dies. Horizontal scaling lets you keep adding machines and survive individual failures.</p></div></details>
+      <details><summary>4. Your only slave database goes offline. What happens to reads? What if the master goes offline instead?</summary><div><p>With one slave down, reads go temporarily to the master until a new slave is set up. If the master goes down, a slave is promoted to master and handles all operations temporarily while a new slave is added. The promoted slave may be missing recent writes, which need recovery scripts.</p></div></details>
+      <details><summary>5. Your product's prices change every few seconds. Should you cache them with a long TTL?</summary><div><p>No. Caches suit data that is read often and modified rarely. With fast-changing data, a long TTL serves stale prices; a very short TTL gives little benefit. Read from the database, or cache with a very short TTL only if slight staleness is acceptable.</p></div></details>
+      <details><summary>6. You updated your logo but users still see the old one from the CDN. What are your options?</summary><div><p>Either invalidate the object using the CDN vendor's API, or use object versioning by changing the URL, e.g. logo.png?v=2, so the CDN treats it as a new file.</p></div></details>
+      <details><summary>7. What should happen if the CDN has an outage?</summary><div><p>Plan a CDN fallback: clients should detect the problem and request the resources directly from the origin server.</p></div></details>
+      <details><summary>8. Why does a stateless web tier make autoscaling easy?</summary><div><p>Because no server holds user data, any request can go to any server. You can add or remove servers freely without losing sessions or needing sticky sessions.</p></div></details>
+      <details><summary>9. One of your four shards is overloaded because three celebrities are on it. What would you do?</summary><div><p>This is the celebrity/hotspot problem. Allocate a dedicated shard to each celebrity (and partition those further if needed), so their heavy read traffic does not crush other users on the same shard.</p></div></details>
+      <details><summary>10. Image filters take 10 seconds and users complain uploads feel slow. How do you fix it?</summary><div><p>Make it asynchronous with a message queue. Web servers publish a processing job and reply immediately; photo workers consume jobs and process them. Add workers when the queue grows, remove them when it is empty.</p></div></details>
+      <details><summary>11. After sharding, a report needs to join users with orders across shards. What is the common fix?</summary><div><p>Denormalize: store the needed fields together so the query runs against a single table on one shard, avoiding cross-shard joins.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Flow: DNS gives IP, client sends HTTP, server returns HTML (web) or JSON (mobile).</li>
+      <li>Default to relational; choose NoSQL for super-low latency, unstructured data, pure serialization, or massive data.</li>
+      <li>Vertical scaling is simple but has a hard limit and no failover; prefer horizontal scaling.</li>
+      <li>Load balancer: public IP to users, private IPs to servers; gives failover and easy growth.</li>
+      <li>Replication: master takes writes, slaves take reads; promote a slave if the master dies (watch for missing data).</li>
+      <li>Cache: read-through; use for read-heavy, rarely-modified data; set TTL; avoid SPOF; overprovision; evict with LRU/LFU/FIFO.</li>
+      <li>CDN: static assets near users; consider cost, TTL, fallback to origin, invalidation via API or versioned URLs.</li>
+      <li>Stateless web tier: sessions in a shared store (NoSQL); enables autoscaling; avoids sticky sessions.</li>
+      <li>Multi-DC: geoDNS routing, failover to healthy DC, replicate data, test and deploy with automation.</li>
+      <li>Message queue: producers publish, consumers process asynchronously; decouples and scales parts independently.</li>
+      <li>Sharding: same schema, different rows; pick a key that distributes evenly; challenges are resharding, hotspots, joins (denormalize).</li>
+      <li>Summary: stateless web tier, redundancy everywhere, cache a lot, multiple DCs, CDN for static, shard data, split into services, monitor and automate.</li>
+    </ul></div>
+  </section>
+</main>
+<script src="assets/app.js"></script></body></html>

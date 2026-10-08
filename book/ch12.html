@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 12: Design a Chat System</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="12">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 12</div><h1>Design a Chat System</h1>
+    <p class="lead">Chat apps like WhatsApp, Slack and Discord feel simple: you type, your friend sees it instantly. Under the hood they need a special kind of always-open connection, servers that remember who is connected where, a storage system that can hold billions of messages forever, and a clever way to show who is online. This chapter builds all of that from scratch.</p>
+    <div class="meta"><span class="tag">~35 min read</span><span class="tag">Advanced</span><span class="tag">Prerequisites: Ch1 (scaling basics), Ch6 (key-value store), Ch7 (unique ID generator)</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>Most of the web works like a vending machine: you (the client) press a button (send a request), and the machine (the server) gives you something back (a response). The server never walks up to you on its own. That model breaks down for chat. When your friend sends you a message, <em>the server</em> needs to push it to <em>you</em> right away, even though you did not ask for anything at that exact moment.</p>
+    <p>So the core problem of this chapter is: <strong>how do we let a server push data to millions of phones and browsers in real time, reliably, and store every message forever?</strong> Along the way we answer smaller questions:</p>
+    <ul>
+      <li>Which network protocol should the client and server use? (Polling, long polling or WebSocket?)</li>
+      <li>Which parts of the system can be "stateless" (any server can handle any request) and which must be "stateful" (a specific server holds your connection)?</li>
+      <li>What database fits chat history, which grows forever and is read mostly from the newest end?</li>
+      <li>How do we generate message IDs that sort by time?</li>
+      <li>How do we keep your phone and laptop in sync?</li>
+      <li>How does the green "online" dot work without flickering every time you go through a tunnel?</li>
+    </ul>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Think of the chat service as a <strong>post office with telephone operators</strong>. Two people never hand letters to each other directly; they always go through the post office (the chat service). The post office keeps a copy of every letter in a giant archive (the key-value store). If the recipient currently has an open phone line to the post office (a WebSocket connection), an operator reads the letter to them instantly. If they are not on the line, the post office sends a postcard saying "you have mail" (a push notification). A receptionist (service discovery) decides which operator each caller is connected to, and a notice board (presence servers) shows who is currently on the phone.</p>
+    </div>
+    <p>There are several kinds of chat apps, and the right design depends on which one you build:</p>
+    <div class="cards">
+      <div class="card green"><h4>1-on-1 chat</h4><p>Apps like Facebook Messenger, WeChat and WhatsApp focus on private conversations between two people (plus groups).</p></div>
+      <div class="card sky"><h4>Office chat</h4><p>Apps like Slack focus on group chat inside a company: channels, teams, threads.</p></div>
+      <div class="card purple"><h4>Large group / community</h4><p>Apps like Discord focus on large groups and low-latency voice chat for communities and gamers.</p></div>
+    </div>
+    <div class="callout key"><div class="callout-title">Key idea</div>
+      <p>Because "chat app" can mean so many things, the very first thing you must do in an interview is <strong>pin down exactly what kind of chat app</strong> the interviewer wants. Everything else follows from that.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Client</dt><dd>The app running on the user's device: a mobile app or a web page in a browser.</dd>
+      <dt>Chat service</dt><dd>The backend system that receives messages from senders, stores them and relays them to recipients. Clients never talk to each other directly.</dd>
+      <dt>HTTP</dt><dd>The standard request/response protocol of the web. The client always starts the conversation; the server only answers.</dd>
+      <dt>Keep-alive</dt><dd>An HTTP header that tells the server to keep the underlying network connection open for reuse, so the client does not pay the cost of a new TCP handshake for each request.</dd>
+      <dt>TCP handshake</dt><dd>The small back-and-forth exchange needed to open a network connection. Doing it over and over is wasteful.</dd>
+      <dt>Polling</dt><dd>The client asks the server "anything new?" at a fixed interval (for example every few seconds), even if nothing happened.</dd>
+      <dt>Long polling</dt><dd>The client asks "anything new?" and the server holds the request open until a message arrives or a timeout passes, then the client immediately asks again.</dd>
+      <dt>WebSocket</dt><dd>A protocol that gives a persistent, two-way (bidirectional) connection between client and server. Either side can send data at any time. It starts life as an HTTP request that is "upgraded".</dd>
+      <dt>Bidirectional</dt><dd>Data can flow in both directions (client to server and server to client) over the same connection.</dd>
+      <dt>Persistent connection</dt><dd>A connection that stays open for a long time instead of being closed after one request.</dd>
+      <dt>Stateless service</dt><dd>A service that does not remember anything about a client between requests. Any server behind the load balancer can handle any request.</dd>
+      <dt>Stateful service</dt><dd>A service where a specific server holds information about a client (here: the open WebSocket connection). The client sticks to that server.</dd>
+      <dt>Load balancer</dt><dd>A component that spreads incoming requests across many servers.</dd>
+      <dt>Service discovery</dt><dd>A component that tells a client which server it should connect to, based on criteria such as location and server load.</dd>
+      <dt>Apache ZooKeeper</dt><dd>A popular open-source tool used for service discovery: it keeps a registry of all available chat servers and picks the best one for a client.</dd>
+      <dt>Presence</dt><dd>Whether a user is online or offline (the green dot).</dd>
+      <dt>Heartbeat</dt><dd>A small periodic "I am still here" message sent by the client so the server knows it is alive.</dd>
+      <dt>Push notification</dt><dd>A message delivered to a phone by the operating system (Apple / Google push services) even when the app is not open.</dd>
+      <dt>Key-value (KV) store</dt><dd>A database that stores data as key → value pairs, like a giant dictionary. Easy to scale horizontally. Examples: HBase, Cassandra.</dd>
+      <dt>Horizontal scaling</dt><dd>Adding more machines to handle more load (as opposed to buying a bigger machine, which is vertical scaling).</dd>
+      <dt>Long tail</dt><dd>The rarely accessed older data. In chat, old messages are seldom read but must still be available.</dd>
+      <dt>Primary key (PK)</dt><dd>The column (or columns) that uniquely identify a row in a table.</dd>
+      <dt>Composite primary key</dt><dd>A primary key made of more than one column, e.g. (channel_id, message_id).</dd>
+      <dt>Message sync queue</dt><dd>A per-user queue (think "inbox") that collects messages waiting to be delivered to that user.</dd>
+      <dt>Snowflake ID</dt><dd>A 64-bit unique ID format (from Chapter 7) whose first bits are a timestamp, so IDs sort by time.</dd>
+      <dt>cur_max_message_id</dt><dd>A variable each device keeps: the largest message ID it has already received. Used to fetch only newer messages.</dd>
+      <dt>Fan-out</dt><dd>Sending one event (a message, or a status change) to many recipients.</dd>
+      <dt>Publish-subscribe (pub/sub)</dt><dd>A messaging pattern where publishers post events to a channel and every subscriber of that channel receives them.</dd>
+      <dt>SPOF</dt><dd>Single point of failure: one component whose failure brings down the whole system.</dd>
+      <dt>End-to-end encryption</dt><dd>Encryption where only the sender and recipient can read a message; even the chat service cannot.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="step1-requirements">Step 1: Understand the problem and establish design scope</h2>
+    <p>The book plays out a short conversation between candidate and interviewer. Here it is, with why each answer matters:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th><th>Why it matters</th></tr>
+      <tr><td>What kind of chat app? 1-on-1 or group?</td><td>Both 1-on-1 and group chat.</td><td>We need two message flows and two table designs.</td></tr>
+      <tr><td>Mobile app, web app, or both?</td><td>Both.</td><td>Clients of different types must all use the same protocol and stay in sync.</td></tr>
+      <tr><td>What is the scale?</td><td>50 million daily active users (DAU).</td><td>Far too many connections for one server; we must scale horizontally.</td></tr>
+      <tr><td>Group member limit?</td><td>Maximum of 100 people.</td><td>Small groups let us copy each message into every member's inbox.</td></tr>
+      <tr><td>Important features? Attachments?</td><td>1-on-1 chat, group chat, online indicator. Text messages only.</td><td>No need to design media storage in the core design.</td></tr>
+      <tr><td>Message size limit?</td><td>Text length less than 100,000 characters.</td><td>Messages are small; fits comfortably in a KV value.</td></tr>
+      <tr><td>End-to-end encryption?</td><td>Not required for now; discuss if time allows.</td><td>Server can read and store plain messages.</td></tr>
+      <tr><td>How long to store chat history?</td><td>Forever.</td><td>Storage grows without limit: we need a store that scales horizontally.</td></tr>
+      <tr><td>Multiple devices?</td><td>Yes, one account can be logged in on multiple devices at once.</td><td>We need multi-device sync.</td></tr>
+      <tr><td>Push notifications?</td><td>Yes.</td><td>Offline users must be told about new messages.</td></tr>
+    </table></div>
+    <p>So the final feature list we design for:</p>
+    <div class="cards">
+      <div class="card green"><h4>Low delivery latency</h4><p>A one-on-one chat feature with fast message delivery.</p></div>
+      <div class="card sky"><h4>Small group chat</h4><p>Up to 100 members per group.</p></div>
+      <div class="card yellow"><h4>Online presence</h4><p>Show whether friends are online.</p></div>
+      <div class="card pink"><h4>Multi-device</h4><p>Same account logged in on several devices at once.</p></div>
+      <div class="card purple"><h4>Push notifications</h4><p>Notify users who are offline.</p></div>
+      <div class="card teal"><h4>Scale</h4><p>Support 50 million DAU.</p></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>50M</b><span>daily active users</span></div>
+      <div class="stat"><b>100</b><span>max group size</span></div>
+      <div class="stat"><b>&lt;100K</b><span>chars per message</span></div>
+      <div class="stat"><b>Forever</b><span>history retention</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step2-protocols">Step 2: How clients and the server talk</h2>
+    <p>First principle: <strong>clients do not talk to each other directly.</strong> Each client connects to the chat service, which supports three jobs:</p>
+    <ol class="steps">
+      <li><strong>Receive messages from clients.</strong> The sender pushes a message to the chat service.</li>
+      <li><strong>Find the right recipients and relay the message.</strong> The service figures out who should get it and delivers it.</li>
+      <li><strong>Hold messages for offline recipients.</strong> If a recipient is not online, the service stores the message until they come back.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Clients never talk directly</div>
+      <div class="flow">
+        <div class="node accent">Sender<small>phone / web</small></div>
+        <div class="arrow">→<small>message</small></div>
+        <div class="node purple">Chat service<small>store + relay</small></div>
+        <div class="arrow">→<small>message</small></div>
+        <div class="node green">Receiver<small>phone / web</small></div>
+      </div>
+      <div class="diagram-caption">The chat service sits in the middle of every conversation. It stores the message, then forwards it to the receiver (or keeps it until the receiver comes online).</div>
+    </div>
+
+    <h3>Sending is easy, receiving is hard</h3>
+    <p><strong>Sender side:</strong> when you send a message, your client starts the conversation, which is exactly what HTTP is good at. Your app opens an HTTP connection and sends the message. The <code>keep-alive</code> header lets the client reuse this connection so it does not redo the TCP handshake for every message. Many popular chat apps (Facebook, for example) originally used HTTP for sending.</p>
+    <p><strong>Receiver side:</strong> this is the tricky part. HTTP is client-initiated: the server cannot just reach out and hand you a message. We need a way for the server to deliver messages the moment they arrive. Over the years three techniques have been used: <strong>polling</strong>, <strong>long polling</strong> and <strong>WebSocket</strong>.</p>
+
+    <h3>Option 1: Polling</h3>
+    <p>With polling, the client periodically asks the server: "Are there new messages for me?" The server answers either "yes, here they are" or "no". Then the client waits a few seconds and asks again.</p>
+    <div class="diagram"><div class="diagram-title">Polling sequence</div>
+      <svg class="dg" viewBox="0 0 700 380">
+        <defs><marker id="c12-poll" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="90" y="15" width="120" height="40" rx="8"/><text x="150" y="40" text-anchor="middle">Client</text>
+        <rect x="490" y="15" width="120" height="40" rx="8"/><text x="550" y="40" text-anchor="middle">Server</text>
+        <line x1="150" y1="55" x2="150" y2="370" stroke-dasharray="4 4"/>
+        <line x1="550" y1="55" x2="550" y2="370" stroke-dasharray="4 4"/>
+        <line x1="150" y1="85" x2="548" y2="85" class="a" marker-end="url(#c12-poll)"/><text x="350" y="78" text-anchor="middle" class="a">New messages?</text>
+        <line x1="550" y1="115" x2="152" y2="115" class="r" marker-end="url(#c12-poll)"/><text x="350" y="108" text-anchor="middle" class="r">No</text>
+        <text x="80" y="150" text-anchor="middle" class="sm">wait</text>
+        <line x1="150" y1="175" x2="548" y2="175" class="a" marker-end="url(#c12-poll)"/><text x="350" y="168" text-anchor="middle" class="a">New messages?</text>
+        <line x1="550" y1="205" x2="152" y2="205" class="r" marker-end="url(#c12-poll)"/><text x="350" y="198" text-anchor="middle" class="r">No</text>
+        <text x="80" y="240" text-anchor="middle" class="sm">wait</text>
+        <line x1="150" y1="265" x2="548" y2="265" class="a" marker-end="url(#c12-poll)"/><text x="350" y="258" text-anchor="middle" class="a">New messages?</text>
+        <line x1="550" y1="295" x2="152" y2="295" class="g" marker-end="url(#c12-poll)"/><text x="350" y="288" text-anchor="middle" class="g">Yes, here is a message</text>
+        <text x="350" y="340" text-anchor="middle" class="sm">Most "No" answers are wasted round trips</text>
+      </svg>
+      <div class="diagram-caption">The client keeps asking on a timer. The more often it asks, the faster it notices messages, but the more server resources it burns on empty answers.</div>
+    </div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul><li>Very simple: just plain HTTP requests on a timer.</li><li>Works everywhere.</li></ul></div>
+      <div class="cons"><h4>Cons</h4><ul><li>Costly: depending on the polling frequency, most answers are "no", wasting server resources.</li><li>Trade-off between delay (poll rarely) and waste (poll often).</li></ul></div>
+    </div>
+
+    <h3>Option 2: Long polling</h3>
+    <p>Long polling fixes the waste. The client sends a request, and the server <strong>holds it open</strong> until either a new message arrives or a timeout is reached. When the client gets a response (message or timeout), it immediately sends a new request. So there is almost always one request "waiting" at the server.</p>
+    <div class="diagram"><div class="diagram-title">Long polling sequence</div>
+      <svg class="dg" viewBox="0 0 700 380">
+        <defs><marker id="c12-lp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="90" y="15" width="120" height="40" rx="8"/><text x="150" y="40" text-anchor="middle">Client</text>
+        <rect x="490" y="15" width="120" height="40" rx="8"/><text x="550" y="40" text-anchor="middle">Server</text>
+        <line x1="150" y1="55" x2="150" y2="370" stroke-dasharray="4 4"/>
+        <line x1="550" y1="55" x2="550" y2="370" stroke-dasharray="4 4"/>
+        <line x1="150" y1="85" x2="548" y2="85" class="a" marker-end="url(#c12-lp)"/><text x="350" y="78" text-anchor="middle" class="a">New messages?</text>
+        <rect x="540" y="90" width="20" height="70" rx="3" class="y"/>
+        <text x="625" y="130" text-anchor="middle" class="sm">holds open</text>
+        <line x1="550" y1="160" x2="152" y2="160" class="g" marker-end="url(#c12-lp)"/><text x="350" y="153" text-anchor="middle" class="g">Message arrives: here it is</text>
+        <line x1="150" y1="195" x2="548" y2="195" class="a" marker-end="url(#c12-lp)"/><text x="350" y="188" text-anchor="middle" class="a">New messages? (immediately)</text>
+        <rect x="540" y="200" width="20" height="90" rx="3" class="y"/>
+        <text x="625" y="250" text-anchor="middle" class="sm">holds open</text>
+        <line x1="550" y1="290" x2="152" y2="290" class="r" marker-end="url(#c12-lp)"/><text x="350" y="283" text-anchor="middle" class="r">Timeout, nothing new</text>
+        <line x1="150" y1="325" x2="548" y2="325" class="a" marker-end="url(#c12-lp)"/><text x="350" y="318" text-anchor="middle" class="a">New messages? (again)</text>
+        <text x="350" y="360" text-anchor="middle" class="sm">Fewer empty answers, but still one-way and still re-connecting</text>
+      </svg>
+      <div class="diagram-caption">The server parks the request until something happens. This cuts down empty responses, but the connection is still restarted after each answer.</div>
+    </div>
+    <p>Long polling still has real drawbacks, and the book lists three:</p>
+    <div class="cards">
+      <div class="card red"><h4>Sender and receiver may be on different servers</h4><p>HTTP servers are usually stateless and sit behind a round-robin load balancer. The server that receives the sender's message may not be the server holding the receiver's long-poll request.</p></div>
+      <div class="card yellow"><h4>Can't tell if a client disconnected</h4><p>The server has no good way to know whether a client is gone or just quietly waiting for the poll to return.</p></div>
+      <div class="card pink"><h4>Inefficient</h4><p>If a user does not chat much, long polling still makes periodic connections after every timeout.</p></div>
+    </div>
+
+    <h3>Option 3: WebSocket (the winner)</h3>
+    <p>WebSocket is the most common solution for sending asynchronous updates from server to client. A WebSocket connection:</p>
+    <ul>
+      <li><strong>is initiated by the client</strong>, just like HTTP;</li>
+      <li><strong>starts as an HTTP connection</strong> and is then "upgraded" to a WebSocket via a well-defined handshake;</li>
+      <li>is <strong>bidirectional</strong> (both sides can send at any time) and <strong>persistent</strong> (stays open);</li>
+      <li>works even if a firewall is in place, because it uses <strong>port 80 or 443</strong>, the same ports used by HTTP/HTTPS.</li>
+    </ul>
+    <div class="diagram"><div class="diagram-title">WebSocket sequence</div>
+      <svg class="dg" viewBox="0 0 700 360">
+        <defs><marker id="c12-ws" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="90" y="15" width="120" height="40" rx="8"/><text x="150" y="40" text-anchor="middle">Client</text>
+        <rect x="490" y="15" width="120" height="40" rx="8"/><text x="550" y="40" text-anchor="middle">Server</text>
+        <line x1="150" y1="55" x2="150" y2="350" stroke-dasharray="4 4"/>
+        <line x1="550" y1="55" x2="550" y2="350" stroke-dasharray="4 4"/>
+        <line x1="150" y1="85" x2="548" y2="85" class="a" marker-end="url(#c12-ws)"/><text x="350" y="78" text-anchor="middle" class="a">HTTP handshake (Upgrade: websocket)</text>
+        <line x1="550" y1="120" x2="152" y2="120" class="a" marker-end="url(#c12-ws)"/><text x="350" y="113" text-anchor="middle" class="a">Acknowledgement (switching protocols)</text>
+        <rect x="150" y="140" width="400" height="190" rx="8" class="g" style="fill:none"/>
+        <text x="350" y="160" text-anchor="middle" class="g">Persistent bidirectional connection</text>
+        <line x1="150" y1="190" x2="548" y2="190" marker-end="url(#c12-ws)"/><text x="350" y="183" text-anchor="middle" class="sm">client sends message</text>
+        <line x1="550" y1="230" x2="152" y2="230" marker-end="url(#c12-ws)"/><text x="350" y="223" text-anchor="middle" class="sm">server pushes new message</text>
+        <line x1="550" y1="270" x2="152" y2="270" marker-end="url(#c12-ws)"/><text x="350" y="263" text-anchor="middle" class="sm">server pushes another message</text>
+        <line x1="150" y1="310" x2="548" y2="310" marker-end="url(#c12-ws)"/><text x="350" y="303" text-anchor="middle" class="sm">client sends heartbeat / message</text>
+      </svg>
+      <div class="diagram-caption">After one upgrade handshake, the same connection stays open. The server can push to the client whenever it wants, with no repeated requests.</div>
+    </div>
+    <p>Since WebSocket is bidirectional, there is no strong technical reason not to use it for <strong>sending</strong> too. Using WebSocket for both sending and receiving simplifies the design and the implementation on both client and server.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th></th><th>Polling</th><th>Long polling</th><th>WebSocket</th></tr>
+      <tr><td>Who starts</td><td>Client, repeatedly</td><td>Client, after each response</td><td>Client, once</td></tr>
+      <tr><td>Server can push?</td><td>No</td><td>Sort of (answers a parked request)</td><td>Yes, any time</td></tr>
+      <tr><td>Wasted requests</td><td>Many</td><td>Fewer (timeouts)</td><td>None</td></tr>
+      <tr><td>Knows if client disconnected?</td><td>No</td><td>No</td><td>Yes (connection state + heartbeat)</td></tr>
+      <tr><td>Latency</td><td>Up to the poll interval</td><td>Low</td><td>Lowest</td></tr>
+    </table></div>
+    <div class="callout warn"><div class="callout-title">Trade-off</div>
+      <p>WebSocket connections are <strong>persistent</strong>, so connection management on the server side becomes critical. Each chat server must hold many open connections efficiently, and when a server dies, its users must reconnect elsewhere. This is why chat servers are the one "stateful" part of our design.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step2-high-level-design">Step 2: High-level design</h2>
+    <p>Although WebSocket is the main protocol for chat, <strong>not everything needs to be a WebSocket</strong>. Signing up, logging in, editing your profile and so on are normal request/response actions and can use plain HTTP. The book splits the system into three categories:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Stateless services</h4><p>Traditional public-facing request/response services: login, signup, user profile, etc. They sit behind a load balancer which routes requests to the right service. Can be monolithic or microservices. Many can be bought off the shelf.</p></div>
+      <div class="card yellow"><h4>Stateful service</h4><p>The chat service. Each client keeps a persistent WebSocket connection to one chat server and normally does not switch servers while that server is available.</p></div>
+      <div class="card pink"><h4>Third-party integration</h4><p>Push notifications. They inform users of new messages even when the app is not running. Covered in depth in Chapter 10.</p></div>
+    </div>
+
+    <h3>Stateless services</h3>
+    <p>These are the boring-but-necessary parts. A load balancer receives HTTP requests and routes them to services such as login, signup and user profile. One stateless service deserves special attention: <strong>service discovery</strong>. Its job is to give the client a list of DNS host names of chat servers that the client could connect to. We dive into it in Step 3.</p>
+
+    <h3>Stateful service</h3>
+    <p>Each client holds an open WebSocket to exactly one chat server. The service discovery coordinates closely with the chat servers to avoid overloading any one of them.</p>
+
+    <h3>Third-party integration</h3>
+    <p>For a chat app, push notification is the most important third-party integration. It is how a user learns a new message arrived when the app is closed.</p>
+
+    <div class="diagram"><div class="diagram-title">Three categories of components</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">User<small>mobile / web</small></div></div>
+        <div class="arch-down">↓<small>HTTP for login/signup/profile, WebSocket for chat</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Stateless</span>
+            <div class="node sky">Load balancer</div>
+            <div class="node sky">Service discovery</div>
+            <div class="node sky">Auth service</div>
+            <div class="node sky">Group mgmt</div>
+            <div class="node sky">User profile</div>
+          </div>
+          <div class="group"><span class="group-label">Stateful</span>
+            <div class="node yellow">Chat service<small>WebSocket</small></div>
+          </div>
+          <div class="group"><span class="group-label">Third party</span>
+            <div class="node pink">Push notification</div>
+          </div>
+        </div>
+      </div>
+      <div class="diagram-caption">HTTP requests go through a load balancer to stateless services. Chat traffic uses a persistent WebSocket to a stateful chat server. Push notifications reach offline users.</div>
+    </div>
+
+    <h3>Scalability: why not just one server?</h3>
+    <p>At small scale, all of the services above could fit on one server. Even at our scale, a modern cloud server could in theory hold all user connections in memory. A rough estimate the book makes: with 1M concurrent users and about 10K of memory per connection on the server, you only need about 10GB of memory to hold every connection on one box.</p>
+    <div class="callout danger"><div class="callout-title">Red flag</div>
+      <p>Proposing a design where everything lives on one server raises a red flag in an interview. The biggest reason is the <strong>single point of failure (SPOF)</strong>: if that one box dies, nobody can chat. It is fine to <em>start</em> with a single-server design, but say clearly that it is a starting point.</p>
+    </div>
+    <p>Here is the adjusted, scaled-out high-level design. The client keeps a persistent WebSocket to a chat server for real-time messaging.</p>
+    <div class="diagram"><div class="diagram-title">Adjusted high-level design</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">User A</div><div class="node accent">User B</div><div class="node accent">User C</div></div>
+        <div class="arch-down">↓<small>HTTP (top) and WebSocket (right)</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Real time (WebSocket)</span>
+            <div class="node yellow">Chat servers</div>
+            <div class="node green">Presence servers</div>
+          </div>
+          <div class="group"><span class="group-label">HTTP behind load balancer</span>
+            <div class="node sky">Load balancer</div>
+            <div class="node sky">API servers</div>
+          </div>
+          <div class="node pink">Notification servers</div>
+        </div>
+        <div class="arch-down">↓<small>read / write</small></div>
+        <div class="arch-row"><div class="node db purple">Key-value stores<small>chat history</small></div><div class="node db teal">Relational DB<small>users, friends, settings</small></div></div>
+      </div>
+      <div class="diagram-caption">Each box can be scaled out independently. Chat history lives in a key-value store; the rest of the data in a relational database.</div>
+    </div>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Component</th><th>What it does</th></tr>
+      <tr><td>Chat servers</td><td>Facilitate message sending and receiving over WebSocket.</td></tr>
+      <tr><td>Presence servers</td><td>Manage online/offline status.</td></tr>
+      <tr><td>API servers</td><td>Handle everything else: login, signup, change profile, etc.</td></tr>
+      <tr><td>Notification servers</td><td>Send push notifications to offline users.</td></tr>
+      <tr><td>Key-value store</td><td>Stores chat history. When an offline user comes online, they see all their previous chat history.</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="step2-storage">Step 2: Storage</h2>
+    <p>Choosing a database is one of the most important decisions here. Is it a relational database (SQL) or a NoSQL database? To decide, look at <strong>what kinds of data</strong> we have and <strong>how they are read and written</strong>.</p>
+    <h3>Two types of data</h3>
+    <div class="cards">
+      <div class="card teal"><h4>Generic data</h4><p>User profiles, settings, user friends lists. Stored in robust, reliable <strong>relational databases</strong>. Replication and sharding are common techniques to meet availability and scalability needs.</p></div>
+      <div class="card purple"><h4>Chat history</h4><p>The messages themselves. This is unique to chat systems, so we need to understand its read/write pattern before picking a store.</p></div>
+    </div>
+    <h3>The read/write pattern of chat history</h3>
+    <ul>
+      <li><strong>The amount of data is enormous.</strong> A previous study revealed that Facebook Messenger and WhatsApp process <strong>60 billion messages a day</strong>.</li>
+      <li><strong>Only recent chats are accessed frequently.</strong> Users usually don't look up old chats.</li>
+      <li><strong>But random access must still work.</strong> Search, viewing your mentions, and jumping to a specific message all need to reach older data, so the data layer must support them.</li>
+      <li><strong>The read to write ratio is about 1:1</strong> for 1-on-1 chat apps. Every message written is read about once.</li>
+    </ul>
+    <div class="stats">
+      <div class="stat"><b>60B</b><span>messages/day (Messenger + WhatsApp)</span></div>
+      <div class="stat"><b>1:1</b><span>read:write ratio</span></div>
+      <div class="stat"><b>Recent</b><span>chats are the hot data</span></div>
+    </div>
+    <h3>Why a key-value store</h3>
+    <p>The book recommends a <strong>key-value store</strong> for chat history, for these reasons:</p>
+    <ol class="steps">
+      <li><strong>Easy horizontal scaling.</strong> When data grows, add more machines. No painful re-architecture.</li>
+      <li><strong>Very low latency</strong> to access data.</li>
+      <li><strong>Relational databases do not handle the long tail of data well.</strong> When indexes grow large, random access becomes expensive.</li>
+      <li><strong>Proven in practice.</strong> Facebook Messenger uses <strong>HBase</strong>, and Discord uses <strong>Cassandra</strong>.</li>
+    </ol>
+    <div class="callout info"><div class="callout-title">Beginner note</div>
+      <p>A key-value store is like a giant dictionary spread over many machines: you give it a key (like a message ID) and it returns the value (the message). Because each key lives on one machine chosen by hashing, adding machines simply spreads the keys thinner. See Chapter 6 for how one works inside.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step2-data-models">Step 2: Data models and message IDs</h2>
+    <h3>Message table for 1-on-1 chat</h3>
+    <p>The primary key is <code>message_id</code>, which also helps decide message order. We <strong>cannot rely on <code>created_at</code></strong> to order messages, because two messages can be created at the same moment.</p>
+    <div class="diagram"><div class="diagram-title">Two message tables</div>
+      <svg class="dg" viewBox="0 0 700 260">
+        <rect x="40" y="20" width="280" height="40" rx="8" class="fill-a"/>
+        <text x="180" y="45" text-anchor="middle" style="fill:#fff">message (1-on-1)</text>
+        <rect x="40" y="60" width="280" height="180" rx="0"/>
+        <text x="60" y="88" class="a">message_id</text><text x="300" y="88" text-anchor="end" class="sm">bigint  PK</text>
+        <text x="60" y="118">message_from</text><text x="300" y="118" text-anchor="end" class="sm">bigint</text>
+        <text x="60" y="148">message_to</text><text x="300" y="148" text-anchor="end" class="sm">bigint</text>
+        <text x="60" y="178">content</text><text x="300" y="178" text-anchor="end" class="sm">text</text>
+        <text x="60" y="208">created_at</text><text x="300" y="208" text-anchor="end" class="sm">timestamp</text>
+        <rect x="380" y="20" width="280" height="40" rx="8" class="fill-g"/>
+        <text x="520" y="45" text-anchor="middle" style="fill:#fff">group_message</text>
+        <rect x="380" y="60" width="280" height="180" rx="0"/>
+        <text x="400" y="88" class="g">channel_id</text><text x="640" y="88" text-anchor="end" class="sm">bigint  PK</text>
+        <text x="400" y="118" class="g">message_id</text><text x="640" y="118" text-anchor="end" class="sm">bigint  PK</text>
+        <text x="400" y="148">user_id</text><text x="640" y="148" text-anchor="end" class="sm">bigint</text>
+        <text x="400" y="178">content</text><text x="640" y="178" text-anchor="end" class="sm">text</text>
+        <text x="400" y="208">created_at</text><text x="640" y="208" text-anchor="end" class="sm">timestamp</text>
+      </svg>
+      <div class="diagram-caption">Left: 1-on-1 messages keyed by message_id. Right: group messages keyed by the composite primary key (channel_id, message_id).</div>
+    </div>
+    <h3>Message table for group chat</h3>
+    <p>The composite primary key is <code>(channel_id, message_id)</code>. "Channel" and "group" mean the same thing here. <code>channel_id</code> is the <strong>partition key</strong> because all queries in a group chat operate within one channel: "give me the latest 50 messages of channel 42". Keeping a whole channel's messages together makes that query fast.</p>
+    <h3>Message ID requirements</h3>
+    <p>How do we generate <code>message_id</code>? It must satisfy two requirements:</p>
+    <ul>
+      <li><strong>IDs must be unique.</strong></li>
+      <li><strong>IDs should be sortable by time</strong>, meaning new rows have higher IDs than old ones.</li>
+    </ul>
+    <p>Three options:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Option</th><th>How it works</th><th>Verdict</th></tr>
+      <tr><td><code>auto_increment</code></td><td>The database hands out 1, 2, 3, ... (MySQL style).</td><td>Not available: NoSQL databases usually do not provide this feature.</td></tr>
+      <tr><td>Global 64-bit sequence generator (Snowflake)</td><td>The ID generator from Chapter 7: timestamp bits + datacenter + machine + sequence. Globally unique and time-ordered.</td><td>Works well.</td></tr>
+      <tr><td>Local sequence number generator</td><td>IDs only need to be unique <strong>within a group / 1-on-1 channel</strong>, because message order only matters inside one conversation.</td><td>Works, and is easier to implement than a global ID generator.</td></tr>
+    </table></div>
+    <div class="callout tip"><div class="callout-title">Worked example</div>
+      <p>In channel 42, messages get local IDs 1001, 1002, 1003. In channel 77, IDs also might be 1001, 1002. That is fine, because the key is <code>(channel_id, message_id)</code>: (42, 1001) and (77, 1001) are different rows. All we ever need is "sort messages inside channel 42", and the local counter gives exactly that.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-service-discovery">Step 3: Service discovery</h2>
+    <p>The primary role of service discovery is to <strong>recommend the best chat server for a client</strong>, based on criteria like geographical location and server capacity. <strong>Apache ZooKeeper</strong> is a popular open-source solution. It registers all available chat servers and picks the best one for each client based on predefined criteria.</p>
+    <div class="diagram"><div class="diagram-title">How a client gets assigned a chat server</div>
+      <svg class="dg" viewBox="0 0 720 300">
+        <defs><marker id="c12-sd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="120" width="100" height="50" rx="8" class="a"/><text x="70" y="150" text-anchor="middle">User A</text>
+        <rect x="180" y="20" width="120" height="50" rx="8" class="s"/><text x="240" y="50" text-anchor="middle">Load balancer</text>
+        <rect x="360" y="20" width="120" height="50" rx="8" class="s"/><text x="420" y="50" text-anchor="middle">API servers</text>
+        <rect x="540" y="20" width="160" height="50" rx="8" class="g"/><text x="620" y="42" text-anchor="middle">Service discovery</text><text x="620" y="60" text-anchor="middle" class="sm">(ZooKeeper)</text>
+        <rect x="360" y="200" width="100" height="44" rx="8" class="y"/><text x="410" y="227" text-anchor="middle">Chat server 1</text>
+        <rect x="480" y="200" width="100" height="44" rx="8" class="y" style="stroke-width:3"/><text x="530" y="227" text-anchor="middle">Chat server 2</text>
+        <rect x="600" y="200" width="100" height="44" rx="8" class="y"/><text x="650" y="227" text-anchor="middle">Chat server 3</text>
+        <path d="M100,120 L190,72" marker-end="url(#c12-sd)"/><text x="115" y="88" class="sm">1. login</text>
+        <line x1="300" y1="45" x2="358" y2="45" marker-end="url(#c12-sd)"/><text x="330" y="35" text-anchor="middle" class="sm">2</text>
+        <line x1="480" y1="45" x2="538" y2="45" marker-end="url(#c12-sd)"/><text x="510" y="35" text-anchor="middle" class="sm">3</text>
+        <path d="M620,70 L540,198" stroke-dasharray="4 4" marker-end="url(#c12-sd)"/><text x="615" y="140" class="sm">4. picks server 2</text>
+        <path d="M120,160 C250,280 420,290 485,240" class="a" marker-end="url(#c12-sd)"/><text x="250" y="270" text-anchor="middle" class="a">5. WebSocket</text>
+      </svg>
+      <div class="diagram-caption">Login goes over HTTP through the load balancer to the API servers. After authentication, service discovery (ZooKeeper) chooses the best chat server and returns its info. The client then opens a WebSocket directly to that server.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>User A tries to log in to the app.</strong></li>
+      <li><strong>The load balancer sends the login request to API servers.</strong></li>
+      <li><strong>After the backend authenticates the user,</strong> service discovery finds the best chat server for User A. In the example, server 2 is chosen and its server info is returned to User A.</li>
+      <li><strong>User A connects to chat server 2 through WebSocket.</strong></li>
+    </ol>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Service discovery is like the host at a busy restaurant. You don't pick your own table; the host looks at which waiter has the fewest tables in your section and seats you there. From then on, that waiter serves you.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-message-flows">Step 3: Message flows</h2>
+    <p>Now the core of the chapter: what happens, step by step, when a message is sent. We look at 1-on-1 chat, multi-device sync, and small group chat.</p>
+    <h3>1-on-1 chat flow</h3>
+    <div class="diagram"><div class="diagram-title">1-on-1 message flow</div>
+      <svg class="dg" viewBox="0 0 760 330">
+        <defs><marker id="c12-one" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="40" width="100" height="44" rx="8" class="a"/><text x="70" y="67" text-anchor="middle">User A</text>
+        <rect x="180" y="40" width="120" height="44" rx="8" class="y"/><text x="240" y="67" text-anchor="middle">Chat server 1</text>
+        <rect x="180" y="150" width="120" height="44" rx="8"/><text x="240" y="177" text-anchor="middle">ID generator</text>
+        <rect x="360" y="40" width="150" height="44" rx="8" class="p"/><text x="435" y="67" text-anchor="middle">Message sync queue</text>
+        <rect x="360" y="150" width="150" height="44" rx="8" class="g"/><text x="435" y="177" text-anchor="middle">KV store</text>
+        <rect x="570" y="10" width="170" height="54" rx="8" class="y"/><text x="655" y="34" text-anchor="middle">Chat server 2</text><text x="655" y="52" text-anchor="middle" class="sm">if B is online</text>
+        <rect x="570" y="120" width="170" height="54" rx="8" class="p"/><text x="655" y="144" text-anchor="middle">PN servers</text><text x="655" y="162" text-anchor="middle" class="sm">if B is offline</text>
+        <rect x="605" y="250" width="100" height="44" rx="8" class="a"/><text x="655" y="277" text-anchor="middle">User B</text>
+        <line x1="120" y1="62" x2="178" y2="62" marker-end="url(#c12-one)"/><text x="150" y="54" text-anchor="middle" class="sm">1</text>
+        <line x1="240" y1="84" x2="240" y2="148" marker-end="url(#c12-one)"/><text x="252" y="120" class="sm">2</text>
+        <line x1="300" y1="62" x2="358" y2="62" marker-end="url(#c12-one)"/><text x="330" y="54" text-anchor="middle" class="sm">3</text>
+        <line x1="435" y1="84" x2="435" y2="148" marker-end="url(#c12-one)"/><text x="447" y="120" class="sm">4</text>
+        <line x1="510" y1="55" x2="568" y2="40" marker-end="url(#c12-one)"/><text x="540" y="38" text-anchor="middle" class="sm">5a</text>
+        <line x1="510" y1="70" x2="568" y2="140" marker-end="url(#c12-one)"/><text x="530" y="115" text-anchor="middle" class="sm">5b</text>
+        <path d="M740,40 C760,120 760,220 707,268" class="a" marker-end="url(#c12-one)"/><text x="732" y="205" text-anchor="end" class="a">6 WS</text>
+        <line x1="655" y1="174" x2="655" y2="248" stroke-dasharray="4 4" marker-end="url(#c12-one)"/><text x="645" y="215" text-anchor="end" class="sm">push</text>
+      </svg>
+      <div class="diagram-caption">A's message is assigned an ID, queued, stored, and then delivered to B either over B's WebSocket (if online) or as a push notification (if offline).</div>
+    </div>
+    <ol class="steps">
+      <li><strong>User A sends a chat message to chat server 1.</strong></li>
+      <li><strong>Chat server 1 obtains a message ID</strong> from the ID generator.</li>
+      <li><strong>Chat server 1 sends the message to the message sync queue.</strong></li>
+      <li><strong>The message is stored in a key-value store.</strong></li>
+      <li><strong>a. If User B is online,</strong> the message is forwarded to chat server 2, where User B is connected. <strong>b. If User B is offline,</strong> a push notification is sent from push notification (PN) servers.</li>
+      <li><strong>Chat server 2 forwards the message to User B.</strong> There is a persistent WebSocket connection between User B and chat server 2.</li>
+    </ol>
+    <div class="callout key"><div class="callout-title">Why this works</div>
+      <p>Notice how this solves the long-polling problem "sender and receiver are on different servers". Chat server 1 does not need to hold B's connection; it hands the message to the queue, and the system routes it to whichever chat server B is connected to (chat server 2).</p>
+    </div>
+
+    <h3>Message synchronization across multiple devices</h3>
+    <p>Many users have several devices. Suppose User A is logged in on a phone and a laptop. Each device has its own WebSocket to chat server 1. How does each device know which messages it is missing?</p>
+    <p>Each device keeps a variable called <code>cur_max_message_id</code>: the ID of the latest message it has seen. A message is considered <strong>new</strong> for a device when both conditions hold:</p>
+    <ul>
+      <li>The recipient ID equals the currently logged-in user ID.</li>
+      <li>The message ID in the key-value store is larger than <code>cur_max_message_id</code>.</li>
+    </ul>
+    <p>Because each device has its own <code>cur_max_message_id</code>, each device can independently fetch exactly the messages it lacks from the KV store.</p>
+    <div class="diagram"><div class="diagram-title">Multi-device sync</div>
+      <svg class="dg" viewBox="0 0 720 260">
+        <defs><marker id="c12-md" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="30" width="200" height="60" rx="8" class="a"/><text x="120" y="55" text-anchor="middle">User A's phone</text><text x="120" y="75" text-anchor="middle" class="sm">cur_max_message_id = 653</text>
+        <rect x="20" y="160" width="200" height="60" rx="8" class="a"/><text x="120" y="185" text-anchor="middle">User A's laptop</text><text x="120" y="205" text-anchor="middle" class="sm">cur_max_message_id = 842</text>
+        <rect x="290" y="95" width="140" height="60" rx="8" class="y"/><text x="360" y="130" text-anchor="middle">Chat server 1</text>
+        <rect x="500" y="80" width="200" height="90" rx="8" class="g"/><text x="600" y="105" text-anchor="middle">KV store</text><text x="600" y="128" text-anchor="middle" class="sm">msgs to A: ... 653, 700,</text><text x="600" y="146" text-anchor="middle" class="sm">781, 842, 901</text>
+        <line x1="220" y1="60" x2="288" y2="112" marker-end="url(#c12-md)"/><text x="255" y="70" class="sm">WS</text>
+        <line x1="220" y1="190" x2="288" y2="140" marker-end="url(#c12-md)"/><text x="255" y="185" class="sm">WS</text>
+        <line x1="432" y1="125" x2="498" y2="125" marker-start="url(#c12-md)" marker-end="url(#c12-md)"/>
+        <text x="360" y="245" text-anchor="middle" class="sm">Phone fetches id &gt; 653 (700, 781, 842, 901). Laptop fetches id &gt; 842 (901).</text>
+      </svg>
+      <div class="diagram-caption">Each device tracks the highest message ID it has seen and asks only for messages addressed to the user with a larger ID.</div>
+    </div>
+
+    <h3>Small group chat flow</h3>
+    <p>Group chat is more complicated than 1-on-1. Suppose there are 3 members in a group: User A, User B and User C. When User A sends a message, the message is <strong>copied to each group member's message sync queue</strong>: one for User B and one for User C. You can think of the message sync queue as an <strong>inbox</strong> for a recipient.</p>
+    <div class="diagram"><div class="diagram-title">Group chat: sender side (fan-out on write)</div>
+      <svg class="dg" viewBox="0 0 700 240">
+        <defs><marker id="c12-g1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="95" width="100" height="44" rx="8" class="a"/><text x="70" y="122" text-anchor="middle">User A</text>
+        <rect x="190" y="95" width="130" height="44" rx="8" class="y"/><text x="255" y="122" text-anchor="middle">Chat server 1</text>
+        <rect x="400" y="30" width="170" height="54" rx="8" class="p"/><text x="485" y="54" text-anchor="middle">Msg sync queue</text><text x="485" y="72" text-anchor="middle" class="sm">User B's inbox</text>
+        <rect x="400" y="150" width="170" height="54" rx="8" class="p"/><text x="485" y="174" text-anchor="middle">Msg sync queue</text><text x="485" y="192" text-anchor="middle" class="sm">User C's inbox</text>
+        <rect x="610" y="35" width="80" height="44" rx="8" class="a"/><text x="650" y="62" text-anchor="middle">User B</text>
+        <rect x="610" y="155" width="80" height="44" rx="8" class="a"/><text x="650" y="182" text-anchor="middle">User C</text>
+        <line x1="120" y1="117" x2="188" y2="117" marker-end="url(#c12-g1)"/>
+        <line x1="320" y1="110" x2="398" y2="60" marker-end="url(#c12-g1)"/><text x="350" y="75" text-anchor="middle" class="sm">copy</text>
+        <line x1="320" y1="125" x2="398" y2="175" marker-end="url(#c12-g1)"/><text x="350" y="165" text-anchor="middle" class="sm">copy</text>
+        <line x1="570" y1="57" x2="608" y2="57" marker-end="url(#c12-g1)"/>
+        <line x1="570" y1="177" x2="608" y2="177" marker-end="url(#c12-g1)"/>
+      </svg>
+      <div class="diagram-caption">User A's single message is written into the inbox (message sync queue) of every other group member.</div>
+    </div>
+    <p>This design is good for small group chat because:</p>
+    <ul>
+      <li>It simplifies message sync: each client only needs to check its own inbox to get new messages.</li>
+      <li>When the group is small, storing a copy in each recipient's inbox is not too expensive.</li>
+    </ul>
+    <p><strong>WeChat uses a similar approach</strong>, and it limits a group to <strong>500 members</strong>. For groups with a lot of users, storing a copy of the message for each member is not acceptable (100,000 members would mean 100,000 copies of every message).</p>
+    <p>On the recipient side, a single user's inbox receives messages from <strong>multiple senders</strong>: your inbox collects messages from every group and person you talk to.</p>
+    <div class="diagram"><div class="diagram-title">Group chat: recipient side</div>
+      <svg class="dg" viewBox="0 0 700 260">
+        <defs><marker id="c12-g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="30" width="100" height="44" rx="8" class="a"/><text x="70" y="57" text-anchor="middle">User A</text>
+        <rect x="20" y="180" width="100" height="44" rx="8" class="a"/><text x="70" y="207" text-anchor="middle">User B</text>
+        <rect x="180" y="30" width="130" height="44" rx="8" class="y"/><text x="245" y="57" text-anchor="middle">Chat server 1</text>
+        <rect x="180" y="180" width="130" height="44" rx="8" class="y"/><text x="245" y="207" text-anchor="middle">Chat server 2</text>
+        <rect x="390" y="100" width="170" height="54" rx="8" class="p"/><text x="475" y="124" text-anchor="middle">Msg sync queue</text><text x="475" y="142" text-anchor="middle" class="sm">User C's inbox</text>
+        <rect x="610" y="105" width="80" height="44" rx="8" class="a"/><text x="650" y="132" text-anchor="middle">User C</text>
+        <line x1="120" y1="52" x2="178" y2="52" marker-end="url(#c12-g2)"/>
+        <line x1="120" y1="202" x2="178" y2="202" marker-end="url(#c12-g2)"/>
+        <line x1="310" y1="60" x2="388" y2="115" marker-end="url(#c12-g2)"/>
+        <line x1="310" y1="195" x2="388" y2="140" marker-end="url(#c12-g2)"/>
+        <line x1="560" y1="127" x2="608" y2="127" marker-end="url(#c12-g2)"/>
+      </svg>
+      <div class="diagram-caption">User C's inbox collects messages from both User A and User B, even though they are on different chat servers.</div>
+    </div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Copy-to-every-inbox: pros</h4><ul><li>Simple sync: each client reads one inbox.</li><li>Fast reads.</li><li>Cheap when groups are small (here, at most 100 members).</li></ul></div>
+      <div class="cons"><h4>Copy-to-every-inbox: cons</h4><ul><li>Writes multiply by group size.</li><li>Unacceptable for very large groups: too much storage and write traffic.</li></ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-online-presence">Step 3: Online presence</h2>
+    <p>The online indicator (the little green dot next to a friend's name) is an essential feature of many chat apps. In the high-level design, <strong>presence servers</strong> manage online status and talk to clients over WebSocket. Four things can change a user's status:</p>
+
+    <h3>1. User login</h3>
+    <p>After the WebSocket connection is built between the client and the real-time service, User A's online status and <code>last_active_at</code> timestamp are saved in the KV store. The presence indicator shows the user is online.</p>
+    <div class="diagram"><div class="diagram-title">Login sets status to online</div>
+      <div class="flow">
+        <div class="node accent">User A</div>
+        <div class="arrow">→<small>WebSocket</small></div>
+        <div class="node green">Presence servers</div>
+        <div class="arrow">→<small>write</small></div>
+        <div class="node db purple">KV store<small>User A: status=online, last_active_at=timestamp</small></div>
+      </div>
+      <div class="diagram-caption">Once the WebSocket is up, presence servers record the user as online.</div>
+    </div>
+
+    <h3>2. User logout</h3>
+    <p>When a user logs out, the request goes through the API servers to the presence servers, which change the status to offline in the KV store. The presence indicator shows the user is offline.</p>
+    <div class="diagram"><div class="diagram-title">Logout sets status to offline</div>
+      <div class="flow">
+        <div class="node accent">User A</div>
+        <div class="arrow">→<small>logout (HTTP)</small></div>
+        <div class="node sky">API servers</div>
+        <div class="arrow">→</div>
+        <div class="node green">Presence servers</div>
+        <div class="arrow">→<small>write</small></div>
+        <div class="node db purple">KV store<small>User A: status=offline</small></div>
+      </div>
+      <div class="diagram-caption">Logging out is an explicit action, so it is easy: just flip the status.</div>
+    </div>
+
+    <h3>3. User disconnection</h3>
+    <p>We all wish our internet were perfectly stable, but it isn't. When a user disconnects, the persistent connection is lost. A naive approach: mark the user offline the instant the connection drops, and back online when it reconnects. The problem: users disconnect and reconnect to the internet frequently in a short time, for example when driving through a tunnel. Updating status on every disconnect/reconnect would make the green dot <strong>flicker</strong> constantly and give a bad user experience.</p>
+    <p>The solution is a <strong>heartbeat mechanism</strong>. Periodically, an online client sends a heartbeat event to presence servers. If presence servers receive a heartbeat within a certain time, say <strong>x seconds</strong>, from the client, the user is considered online. Otherwise it is offline. In the book's example, the client sends a heartbeat <strong>every 5 seconds</strong>; after sending 3 heartbeat events, the client disconnects and does not reconnect within x = <strong>30 seconds</strong>, so its status is changed to offline.</p>
+    <div class="diagram"><div class="diagram-title">Heartbeat timeline: why it avoids flicker</div>
+      <svg class="dg" viewBox="0 0 700 300">
+        <text x="60" y="30" class="a">Scenario 1: short disconnection (a tunnel)</text>
+        <circle cx="60" cy="62" r="6" class="fill-g"/><circle cx="110" cy="62" r="6" class="fill-g"/><circle cx="160" cy="62" r="6" class="fill-g"/><circle cx="210" cy="62" r="6" class="fill-g"/>
+        <rect x="222" y="48" width="76" height="28" rx="4" class="y" style="fill:none" stroke-dasharray="4 3"/><text x="260" y="66" text-anchor="middle" class="sm">no signal</text>
+        <circle cx="310" cy="62" r="6" class="fill-g"/><circle cx="360" cy="62" r="6" class="fill-g"/><circle cx="410" cy="62" r="6" class="fill-g"/><circle cx="460" cy="62" r="6" class="fill-g"/><circle cx="510" cy="62" r="6" class="fill-g"/><circle cx="560" cy="62" r="6" class="fill-g"/><circle cx="610" cy="62" r="6" class="fill-g"/><circle cx="660" cy="62" r="6" class="fill-g"/>
+        <rect x="60" y="86" width="600" height="14" rx="4" class="fill-g"/>
+        <text x="360" y="120" text-anchor="middle" class="sm">10 s gap is shorter than 30 s, so status stays ONLINE the whole time (no flicker)</text>
+        <text x="60" y="155" class="a">Scenario 2: real disconnection</text>
+        <circle cx="60" cy="182" r="6" class="fill-g"/><circle cx="110" cy="182" r="6" class="fill-g"/><circle cx="160" cy="182" r="6" class="fill-g"/>
+        <line x1="160" y1="172" x2="460" y2="172" class="r" stroke-dasharray="4 3"/>
+        <line x1="460" y1="165" x2="460" y2="215" class="r"/>
+        <text x="310" y="166" text-anchor="middle" class="sm">no heartbeat for 30 s</text>
+        <rect x="60" y="200" width="400" height="14" rx="4" class="fill-g"/>
+        <rect x="460" y="200" width="200" height="14" rx="4" class="fill-r"/>
+        <text x="560" y="236" text-anchor="middle" class="r">marked OFFLINE</text>
+        <line x1="60" y1="260" x2="660" y2="260"/>
+        <text x="60" y="280" text-anchor="middle" class="sm">0s</text><text x="160" y="280" text-anchor="middle" class="sm">10s</text><text x="260" y="280" text-anchor="middle" class="sm">20s</text><text x="360" y="280" text-anchor="middle" class="sm">30s</text><text x="460" y="280" text-anchor="middle" class="sm">40s</text><text x="560" y="280" text-anchor="middle" class="sm">50s</text><text x="660" y="280" text-anchor="middle" class="sm">60s</text>
+      </svg>
+      <div class="diagram-caption">Green dots are heartbeats sent every 5 seconds. A short gap (scenario 1) is forgiven. Only when no heartbeat arrives for 30 seconds (scenario 2: last heartbeat at 10s, offline at 40s) is the user marked offline.</div>
+    </div>
+    <div class="callout tip"><div class="callout-title">Trade-off</div>
+      <p>A shorter timeout shows offline status sooner but flickers more on bad networks. A longer timeout is smoother but leaves people looking "online" for a while after they really left. 5-second heartbeats with a 30-second timeout is the book's example balance.</p>
+    </div>
+
+    <h3>4. Online status fan-out</h3>
+    <p>How do User A's friends learn when A's status changes? Presence servers use a <strong>publish-subscribe model</strong>, in which each friend pair maintains a channel. When User A's online status changes, it publishes the event to three channels: <strong>A-B, A-C and A-D</strong>. Those three channels are subscribed by User B, C and D respectively, so it is easy for friends to get online status updates. Communication between clients and servers is through real-time WebSocket.</p>
+    <div class="diagram"><div class="diagram-title">Presence fan-out with pub/sub channels</div>
+      <svg class="dg" viewBox="0 0 700 260">
+        <defs><marker id="c12-ps" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="105" width="110" height="50" rx="8" class="a"/><text x="75" y="128" text-anchor="middle">User A</text><text x="75" y="145" text-anchor="middle" class="sm">goes online</text>
+        <rect x="190" y="105" width="130" height="50" rx="8" class="g"/><text x="255" y="135" text-anchor="middle">Presence servers</text>
+        <rect x="390" y="25" width="120" height="44" rx="8" class="p"/><text x="450" y="52" text-anchor="middle">Channel A-B</text>
+        <rect x="390" y="108" width="120" height="44" rx="8" class="p"/><text x="450" y="135" text-anchor="middle">Channel A-C</text>
+        <rect x="390" y="191" width="120" height="44" rx="8" class="p"/><text x="450" y="218" text-anchor="middle">Channel A-D</text>
+        <rect x="580" y="25" width="100" height="44" rx="8" class="a"/><text x="630" y="52" text-anchor="middle">User B</text>
+        <rect x="580" y="108" width="100" height="44" rx="8" class="a"/><text x="630" y="135" text-anchor="middle">User C</text>
+        <rect x="580" y="191" width="100" height="44" rx="8" class="a"/><text x="630" y="218" text-anchor="middle">User D</text>
+        <line x1="130" y1="130" x2="188" y2="130" marker-end="url(#c12-ps)"/>
+        <line x1="320" y1="120" x2="388" y2="50" marker-end="url(#c12-ps)"/>
+        <line x1="320" y1="130" x2="388" y2="130" marker-end="url(#c12-ps)"/>
+        <line x1="320" y1="140" x2="388" y2="212" marker-end="url(#c12-ps)"/>
+        <line x1="510" y1="47" x2="578" y2="47" marker-end="url(#c12-ps)"/><text x="545" y="40" text-anchor="middle" class="sm">sub</text>
+        <line x1="510" y1="130" x2="578" y2="130" marker-end="url(#c12-ps)"/><text x="545" y="123" text-anchor="middle" class="sm">sub</text>
+        <line x1="510" y1="213" x2="578" y2="213" marker-end="url(#c12-ps)"/><text x="545" y="206" text-anchor="middle" class="sm">sub</text>
+      </svg>
+      <div class="diagram-caption">A's status change is published once per friend channel; each friend subscribed to their channel with A receives it over WebSocket.</div>
+    </div>
+    <p>This works well for a <strong>small user group</strong>. WeChat uses a similar approach because its user group is capped at 500. For larger groups, informing every member about online status is expensive and time consuming. Assume a group has <strong>100,000 members</strong>: each status change generates 100,000 events. To solve the performance bottleneck, a possible solution is to <strong>fetch online status only when a user enters a group or manually refreshes the friend list</strong>.</p>
+    <div class="callout key"><div class="callout-title">Worked example</div>
+      <p>Group of 100,000 members. If each member goes online or offline just twice a day, that's 200,000 status changes, each fanned out to 100,000 people: 20 billion events a day for one group. Pulling status on demand ("show me who is online in this group right now") avoids almost all of that.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step4-wrap-up">Step 4: Wrap up</h2>
+    <p>We built a system that supports 1-on-1 and small group chat, using WebSocket for real-time communication between client and server. If there is extra time, the book suggests these talking points:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Media files</h4><p>Extend the app to support photos and videos. Media is much bigger than text. Discuss <strong>compression</strong>, <strong>cloud storage</strong>, and <strong>thumbnails</strong>.</p></div>
+      <div class="card purple"><h4>End-to-end encryption</h4><p>WhatsApp supports it for messages. Only the sender and recipient can read messages. Interested readers can look at the references in the book.</p></div>
+      <div class="card green"><h4>Caching messages on the client</h4><p>Storing messages on the client side reduces data transfer between client and server.</p></div>
+      <div class="card yellow"><h4>Improve load time</h4><p>Slack built a geographically distributed network to cache users' data, channels, etc. for better load time.</p></div>
+      <div class="card red"><h4>Error handling: chat server error</h4><p>There may be hundreds of thousands of persistent connections or more to one chat server. If a chat server goes offline, service discovery (ZooKeeper) provides a new chat server for clients to establish new connections with.</p></div>
+      <div class="card pink"><h4>Error handling: message resend</h4><p>Retry and queueing are common techniques for resending messages.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <div class="diagram"><div class="diagram-title">Final chat system architecture</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">User A<small>phone + laptop</small></div><div class="node accent">User B<small>phone</small></div><div class="node accent">Group members</div></div>
+        <div class="arch-down">↓<small>HTTP (login, profile)  |  WebSocket (messages, presence)</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Stateless (HTTP)</span>
+            <div class="node sky">Load balancer</div><div class="node sky">API servers</div><div class="node green">Service discovery<small>ZooKeeper</small></div>
+          </div>
+          <div class="group"><span class="group-label">Stateful (WebSocket)</span>
+            <div class="node yellow">Chat servers</div><div class="node green">Presence servers</div>
+          </div>
+        </div>
+        <div class="arch-down">↓<small>get ID, enqueue, store</small></div>
+        <div class="arch-row"><div class="node">ID generator</div><div class="node pink">Message sync queues<small>per-user inbox</small></div><div class="node pink">Notification servers<small>push to offline users</small></div></div>
+        <div class="arch-down">↓<small>persist</small></div>
+        <div class="arch-row"><div class="node db purple">KV store<small>chat history, presence</small></div><div class="node db teal">Relational DB<small>users, friends, settings</small></div></div>
+      </div>
+      <div class="diagram-caption">The complete design: stateless HTTP services for account actions, stateful chat and presence servers for real-time traffic, queues + KV store for messages, and push notifications for offline users.</div>
+    </div>
+    <h3>Walkthrough: User A sends "Hi" to User B</h3>
+    <ol class="steps">
+      <li><strong>Login.</strong> A's app sends a login request over HTTP. The load balancer forwards it to an API server, which authenticates A.</li>
+      <li><strong>Server assignment.</strong> Service discovery (ZooKeeper) picks the best chat server for A, say chat server 1, based on location and load, and returns it.</li>
+      <li><strong>Connect.</strong> A opens a WebSocket to chat server 1. Presence servers write <code>status=online, last_active_at=now</code> to the KV store and publish "A is online" to channels A-B, A-C, ...</li>
+      <li><strong>Send.</strong> A types "Hi" and it travels up the WebSocket to chat server 1.</li>
+      <li><strong>ID.</strong> Chat server 1 gets a time-sortable message ID (Snowflake or a local per-channel sequence).</li>
+      <li><strong>Queue + store.</strong> The message goes into the message sync queue and is persisted in the KV store forever.</li>
+      <li><strong>Deliver.</strong> B is online on chat server 2, so the message is forwarded there and pushed down B's WebSocket. If B were offline, notification servers would send a push notification instead.</li>
+      <li><strong>Other devices.</strong> A's laptop sees its <code>cur_max_message_id</code> is behind and pulls the new message too, so A's own history is in sync everywhere.</li>
+      <li><strong>Heartbeats.</strong> Meanwhile both clients send heartbeats every 5 seconds. If B's phone goes silent for 30 seconds, presence marks B offline and notifies B's friends.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="interview-guide">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Understand the problem and establish scope</div><div class="iv-time">3–10 min</div></div>
+      <ul><li>Ask: 1-on-1 or group? Mobile, web, or both? Scale (DAU)? Group size limit? Text only or media? Message size? Encryption? Retention? Multi-device? Push notifications?</li><li>Write the agreed features on the board.</li></ul>
+      <div class="say">"Before I design anything, I want to know which kind of chat app we're building, since a WhatsApp-style app, a Slack-style app and a Discord-style app have very different needs. Is this 1-on-1, group, or both? And how many daily users should we plan for?"</div>
+      <div class="say them">"Both 1-on-1 and group, 50 million DAU, groups up to 100 people, text only, keep history forever."</div>
+      <div class="say">"Great. So I'll design for low-latency 1-on-1 chat, small group chat, online presence, multi-device support and push notifications, at 50 million DAU. End-to-end encryption is out of scope for now."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">Propose high-level design</div><div class="iv-time">10–15 min</div></div>
+      <ul><li>Explain why clients go through the chat service.</li><li>Compare polling, long polling and WebSocket; pick WebSocket.</li><li>Split into stateless, stateful and third-party components; draw the architecture.</li><li>Pick storage: relational for generic data, KV store for chat history; show the data models and ID requirements.</li></ul>
+      <div class="say">"Sending a message fits HTTP fine, but receiving doesn't, because HTTP is client-initiated. Polling wastes resources, long polling has trouble when sender and receiver are on different servers and can't detect disconnects. So I'll use WebSocket: it's bidirectional, persistent, starts as an HTTP upgrade and runs over ports 80/443. I'll use it for both sending and receiving to keep things simple."</div>
+      <div class="say them">"Why not store messages in MySQL?"</div>
+      <div class="say">"The volume is huge, for reference Messenger and WhatsApp handle about 60 billion messages a day, and we keep history forever. Reads are mostly recent messages but we still need random access for search and jumping to messages. Relational databases get expensive on random access once indexes grow large. A key-value store scales horizontally with low latency; Facebook uses HBase and Discord uses Cassandra for this."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Design deep dive</div><div class="iv-time">10–25 min</div></div>
+      <ul><li>Service discovery with ZooKeeper.</li><li>1-on-1 flow (ID generator, sync queue, KV store, online vs offline delivery).</li><li>Multi-device sync with cur_max_message_id.</li><li>Small group fan-out into inboxes.</li><li>Presence: login, logout, heartbeat, pub/sub fan-out.</li></ul>
+      <div class="say">"When a user logs in, the API server authenticates them and ZooKeeper picks the best chat server based on location and capacity. The client then opens a WebSocket directly to that server."</div>
+      <div class="say them">"How do you stop the online indicator flickering when someone's on a train?"</div>
+      <div class="say">"Instead of reacting to every connection drop, clients send a heartbeat every 5 seconds. A user is only marked offline if no heartbeat arrives for, say, 30 seconds. Short blips are forgiven."</div>
+      <div class="say them">"What if a group had 100,000 members?"</div>
+      <div class="say">"Copying each message into 100,000 inboxes and fanning out presence to 100,000 people would be too expensive. That approach is right for small groups, WeChat caps at 500. For huge groups, I'd fetch presence only when a user opens the group or refreshes, rather than pushing every change."</div>
+      <div class="say them">"How do you order messages?"</div>
+      <div class="say">"Not by created_at, since two messages can share a timestamp. message_id must be unique and time-sortable. NoSQL has no auto_increment, so I'd use a Snowflake-style 64-bit ID, or a simpler local sequence that's only unique within a channel, which is enough because ordering only matters inside one conversation."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Mention media files, end-to-end encryption, client caching, load time, error handling.</li></ul>
+      <div class="say">"If we had more time I'd add media support with compression, cloud storage and thumbnails; end-to-end encryption; client-side caching; and geographically distributed caches like Slack to improve load time. For errors: if a chat server dies, ZooKeeper hands clients a new server to reconnect to, and messages are resent with retries and queueing."</div>
+      <div class="say them">"A chat server with hundreds of thousands of connections crashes. What happens?"</div>
+      <div class="say">"Clients notice the WebSocket is gone, go back to service discovery, get a new chat server and reconnect. Then each device uses its cur_max_message_id to pull anything it missed from the KV store, so no messages are lost."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Designing everything on one server</div><p>Even if the memory math says one machine could hold all connections, it's a single point of failure. Start simple if you like, but scale out before you finish.</p></div>
+    <div class="callout danger"><div class="callout-title">Using plain HTTP or polling to receive messages</div><p>HTTP is client-initiated; polling wastes resources. Explain the progression to WebSocket and why.</p></div>
+    <div class="callout warn"><div class="callout-title">Making every service a WebSocket</div><p>Login, signup and profile updates are normal request/response actions. Keep them stateless behind a load balancer.</p></div>
+    <div class="callout warn"><div class="callout-title">Ordering messages by created_at</div><p>Two messages can be created at the same time. Use a unique, time-sortable message_id.</p></div>
+    <div class="callout warn"><div class="callout-title">Assuming auto_increment exists</div><p>NoSQL key-value stores usually don't provide it. Propose Snowflake or a local per-channel sequence.</p></div>
+    <div class="callout warn"><div class="callout-title">Marking users offline on every disconnect</div><p>That causes flicker. Use heartbeats and a timeout.</p></div>
+    <div class="callout warn"><div class="callout-title">Applying the small-group fan-out to huge groups</div><p>Copying messages to every inbox and pushing every presence change only works for small groups. Call out the limit.</p></div>
+    <div class="callout warn"><div class="callout-title">Forgetting offline users and multiple devices</div><p>Always say what happens when the recipient is offline (push notification) and how a second device catches up (cur_max_message_id).</p></div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. Why is plain HTTP a poor fit for receiving chat messages?</summary><div><p>HTTP is client-initiated: the server can only answer requests, it cannot start a conversation. A chat server needs to push a message to the recipient the moment it arrives, which HTTP alone cannot do.</p></div></details>
+      <details><summary>2. Give the three drawbacks of long polling from the book.</summary><div><p>(1) Sender and receiver may be connected to different (stateless, round-robin) chat servers, so the server receiving the message may not hold the receiver's connection. (2) The server can't tell if a client has disconnected. (3) It's inefficient: users who rarely chat still make periodic connections after every timeout.</p></div></details>
+      <details><summary>3. Why does WebSocket usually work even behind corporate firewalls?</summary><div><p>It starts as an HTTP connection and is upgraded via a handshake, and it uses ports 80 or 443, the same ports as HTTP/HTTPS, which firewalls normally allow.</p></div></details>
+      <details><summary>4. Which parts of the system are stateful, and why?</summary><div><p>The chat servers (the chat service). Each client holds a persistent WebSocket to one specific chat server and normally sticks with it, so that server "holds state" for the client. Login, signup and profile are stateless and can be served by any server behind a load balancer.</p></div></details>
+      <details><summary>5. Why choose a key-value store for chat history over a relational database?</summary><div><p>Easy horizontal scaling, very low latency, and relational databases handle the long tail of data poorly: random access becomes expensive as indexes grow. It's proven in practice: Facebook Messenger uses HBase, Discord uses Cassandra.</p></div></details>
+      <details><summary>6. What is the primary key of the group message table, and why is channel_id the partition key?</summary><div><p>(channel_id, message_id). All queries in a group chat operate within a channel ("latest messages in channel X"), so partitioning by channel keeps those messages together for fast reads.</p></div></details>
+      <details><summary>7. Scenario: your phone has cur_max_message_id = 500. Messages to you with IDs 480, 510 and 530 are in the KV store. What does the phone fetch?</summary><div><p>510 and 530. A message is new for this device if the recipient is the logged-in user and its ID is greater than cur_max_message_id. 480 has already been seen.</p></div></details>
+      <details><summary>8. Scenario: heartbeats every 5 seconds, timeout 30 seconds. A user's last heartbeat is at t = 12s and they never come back. When are they marked offline? What if they reconnect at t = 30s?</summary><div><p>Offline at about t = 42s (12 + 30). If they reconnect and send a heartbeat at t = 30s, only 18 seconds passed, so they stay online the whole time with no flicker.</p></div></details>
+      <details><summary>9. Why does copying each message into every member's inbox work for this design but not for a 100,000-member group?</summary><div><p>With at most 100 members, storing a copy per recipient is cheap and makes sync simple (each client reads only its inbox). With 100,000 members, every message becomes 100,000 writes, which is unacceptable. WeChat uses the inbox approach but limits groups to 500.</p></div></details>
+      <details><summary>10. A chat server crashes. Walk through recovery.</summary><div><p>Clients detect the lost connection, go back to service discovery (ZooKeeper), which provides a new chat server. Clients reconnect via WebSocket and pull any missed messages using cur_max_message_id. Undelivered messages are resent using retry and queueing.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Scope: 1-on-1 + groups up to 100, mobile + web, 50M DAU, text &lt; 100,000 chars, history forever, multi-device, push notifications, presence.</li>
+      <li>Clients never talk directly; the chat service receives, relays and stores messages for offline users.</li>
+      <li>Polling = wasteful; long polling = different-server problem, can't detect disconnects, inefficient; WebSocket = bidirectional, persistent, HTTP upgrade, ports 80/443.</li>
+      <li>Use WebSocket for both sending and receiving; HTTP for login/signup/profile.</li>
+      <li>Stateless services behind a load balancer; stateful chat servers; push notification as third-party integration.</li>
+      <li>One server = SPOF. Scale out chat, presence, API and notification servers.</li>
+      <li>Generic data in relational DB; chat history in a KV store (HBase at Facebook, Cassandra at Discord). 60B messages/day, read:write about 1:1, recent data is hot.</li>
+      <li>1-on-1 table PK: message_id. Group table PK: (channel_id, message_id), channel_id is the partition key.</li>
+      <li>message_id must be unique and time-sortable: no auto_increment in NoSQL; use Snowflake or a local per-channel sequence.</li>
+      <li>ZooKeeper service discovery picks the best chat server after login; client connects via WebSocket.</li>
+      <li>1-on-1 flow: chat server, ID generator, message sync queue, KV store, then WebSocket (online) or push notification (offline). Devices sync with cur_max_message_id.</li>
+      <li>Presence: heartbeat every 5 s, offline after 30 s silence; pub/sub channel per friend pair; for huge groups fetch status on enter/refresh.</li>
+    </ul></div>
+  </section>
+
+</main>
+<script src="assets/app.js"></script></body></html>

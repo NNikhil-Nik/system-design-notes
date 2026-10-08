@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 13: Design a Search Autocomplete System</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="13">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 13</div><h1>Design a Search Autocomplete System</h1>
+    <p class="lead">When you type "din" into Google and it instantly suggests "dinner ideas", that's search autocomplete. This chapter designs a system that, for every letter you type, returns the 5 most popular matching searches in under 100 milliseconds, for 10 million users a day. The star of the show is a tree-shaped data structure called a trie.</p>
+    <div class="meta"><span class="tag">~35 min read</span><span class="tag">Advanced</span><span class="tag">Prerequisites: Ch1 (scaling, caching, CDN), Ch2 (estimation), Ch5 (sharding / consistent hashing)</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>Search autocomplete is also called <strong>typeahead</strong>, <strong>search-as-you-type</strong> or <strong>incremental search</strong>. It appears in Google's search box, on Amazon, in your phone's contacts, everywhere. The interview question is usually phrased as: <em>"Design a system that returns the top k most searched queries for what the user has typed so far."</em></p>
+    <p>This looks simple, but at scale it is hard:</p>
+    <ul>
+      <li>Every single keystroke is a request. One search of "dinner" causes 6 lookups.</li>
+      <li>Answers must come back faster than the user types the next letter (about 100 ms).</li>
+      <li>Popularity changes over time, so the data must be refreshed, but refreshing must never slow down lookups.</li>
+      <li>Bad suggestions (hateful, violent, dangerous) must be removable.</li>
+    </ul>
+    <p>The chapter's answer has two halves: a <strong>query service</strong> that answers "top 5 for this prefix" extremely fast using a pre-computed trie, and a <strong>data gathering service</strong> that collects what people search for and rebuilds the trie in the background, for example once a week.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Imagine a librarian who, every Sunday night, reads the whole week's request log and writes on a set of index cards: "people who start with <em>tr</em> most often want: true, try". During the week, when someone walks in and says "tr...", the librarian doesn't think at all; they just read the card. Writing cards (data gathering) is slow and happens offline. Reading cards (query service) is instant. That separation is the whole design.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Autocomplete / typeahead</dt><dd>Suggesting full search queries while the user is still typing.</dd>
+      <dt>Query</dt><dd>The full text a user searches for, e.g. "dinner ideas".</dd>
+      <dt>Prefix</dt><dd>The beginning part of a query that the user has typed so far, e.g. "din".</dd>
+      <dt>Top k</dt><dd>The k best results. Here k = 5: the five most popular queries starting with the prefix.</dd>
+      <dt>Frequency</dt><dd>How many times a query has been searched. Used as the popularity score.</dd>
+      <dt>DAU</dt><dd>Daily active users.</dd>
+      <dt>QPS</dt><dd>Queries per second: how many requests the system handles each second.</dd>
+      <dt>Trie (prefix tree)</dt><dd>A tree data structure where each node represents a string prefix, and moving down one edge adds one character. Pronounced "try". Designed for fast prefix lookups.</dd>
+      <dt>Root node</dt><dd>The top node of the trie; represents the empty string.</dd>
+      <dt>Child / subtree</dt><dd>A child is a node directly below another. The subtree of a node is that node plus everything below it.</dd>
+      <dt>Big-O notation</dt><dd>A way to describe how the work grows with input size. O(1) means constant time regardless of size; O(c log c) grows a bit faster than the number c.</dd>
+      <dt>Cache</dt><dd>A fast, usually in-memory copy of data kept close to where it is needed, so you avoid slow lookups.</dd>
+      <dt>Analytics logs</dt><dd>Raw records of every search query and when it happened. Append-only and not indexed.</dd>
+      <dt>Aggregator</dt><dd>A process that rolls raw logs up into summary counts (e.g. "query X was searched 3,000 times this week").</dd>
+      <dt>Worker</dt><dd>A set of servers running asynchronous jobs at regular intervals; here they build the trie.</dd>
+      <dt>Trie DB</dt><dd>Persistent storage that holds the trie.</dd>
+      <dt>Trie cache</dt><dd>A distributed in-memory cache holding the trie for fast reads.</dd>
+      <dt>Snapshot</dt><dd>A copy of data at a point in time, e.g. the weekly trie.</dd>
+      <dt>Document store</dt><dd>A NoSQL database (like MongoDB) storing data as documents, convenient for serialized blobs.</dd>
+      <dt>Key-value store</dt><dd>A NoSQL database that maps a key to a value, like a giant hash table.</dd>
+      <dt>Serialize</dt><dd>Turn an in-memory structure (like a trie) into bytes that can be stored or sent.</dd>
+      <dt>AJAX</dt><dd>A browser technique for sending requests and receiving responses in the background without reloading the page.</dd>
+      <dt>Cache-Control header</dt><dd>An HTTP header telling the browser whether and how long it may cache a response.</dd>
+      <dt>Data sampling</dt><dd>Logging only 1 out of every N requests to save processing power and storage.</dd>
+      <dt>Filter layer</dt><dd>A component placed in front of the trie cache that removes unwanted suggestions before they reach users.</dd>
+      <dt>Sharding</dt><dd>Splitting data across multiple servers, each holding a part (a shard).</dd>
+      <dt>Shard map manager</dt><dd>A lookup service that knows which shard holds which range of data.</dd>
+      <dt>CDN</dt><dd>Content delivery network: servers spread around the world that hold copies of content close to users.</dd>
+      <dt>Unicode</dt><dd>A standard that encodes characters for all the world's writing systems.</dd>
+      <dt>Stream processing</dt><dd>Processing data continuously as it arrives, instead of in large periodic batches.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="step1-requirements">Step 1: Understand the problem and establish design scope</h2>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th><th>Why it matters</th></tr>
+      <tr><td>Is matching only at the beginning of a query, or in the middle too?</td><td>Only at the beginning.</td><td>We need prefix matching only, which is exactly what a trie is built for.</td></tr>
+      <tr><td>How many suggestions should be returned?</td><td>5.</td><td>k = 5, a small fixed number we can pre-compute.</td></tr>
+      <tr><td>How do we choose which 5?</td><td>By popularity, decided by historical query frequency.</td><td>We need to count how often each query is searched.</td></tr>
+      <tr><td>Spell check or autocorrect?</td><td>No.</td><td>Keeps the core design simpler.</td></tr>
+      <tr><td>Are queries in English?</td><td>Yes. Multi-language support can be discussed if time allows.</td><td>Small alphabet in the trie for now.</td></tr>
+      <tr><td>Capital letters and special characters?</td><td>No, assume all queries are lowercase alphabetic characters.</td><td>Each node has at most 26 children.</td></tr>
+      <tr><td>How many users?</td><td>10 million DAU.</td><td>Drives the QPS and storage estimates.</td></tr>
+    </table></div>
+    <h3>Requirements summary</h3>
+    <div class="cards">
+      <div class="card green"><h4>Fast response time</h4><p>As a user types, suggestions must show up fast enough. An article about Facebook's autocomplete system says it needs to return results <strong>within 100 milliseconds</strong>, otherwise it causes stuttering.</p></div>
+      <div class="card sky"><h4>Relevant</h4><p>Suggestions should be relevant to the search term.</p></div>
+      <div class="card yellow"><h4>Sorted</h4><p>Results must be sorted by popularity or other ranking models.</p></div>
+      <div class="card purple"><h4>Scalable</h4><p>The system can handle high traffic volume.</p></div>
+      <div class="card pink"><h4>Highly available</h4><p>The system stays available and accessible when part of it is offline, slows down, or has unexpected network errors.</p></div>
+    </div>
+
+    <h3>Back-of-the-envelope estimation</h3>
+    <p>Let's do the math step by step, the way the book does.</p>
+    <ol class="steps">
+      <li><strong>Users and searches.</strong> Assume 10 million DAU, and an average person performs 10 searches per day.</li>
+      <li><strong>Size of a query.</strong> 20 bytes of data per query string: assume ASCII encoding (1 byte per character), 4 words per query, and 5 characters per word on average. 4 × 5 = 20 bytes.</li>
+      <li><strong>Requests per query.</strong> For every character entered into the search box, the client sends a request to the backend. So on average about <strong>20 requests are sent per search query</strong>. For example, typing "dinner" sends 6 requests:
+        <pre><code>search?q=d
+search?q=di
+search?q=din
+search?q=dinn
+search?q=dinne
+search?q=dinner</code></pre></li>
+      <li><strong>QPS.</strong> 10,000,000 users × 10 queries/day × 20 characters / 24 hours / 3,600 seconds ≈ <strong>24,000 QPS</strong>.</li>
+      <li><strong>Peak QPS.</strong> QPS × 2 ≈ <strong>48,000</strong>.</li>
+      <li><strong>New storage.</strong> Assume 20% of daily queries are new. 10 million × 10 queries/day × 20 bytes per query × 20% = <strong>0.4 GB</strong> of new data added to storage daily.</li>
+    </ol>
+    <div class="stats">
+      <div class="stat"><b>10M</b><span>DAU</span></div>
+      <div class="stat"><b>~24,000</b><span>QPS</span></div>
+      <div class="stat"><b>~48,000</b><span>peak QPS</span></div>
+      <div class="stat"><b>0.4 GB</b><span>new data per day</span></div>
+      <div class="stat"><b>100 ms</b><span>response budget</span></div>
+    </div>
+    <div class="callout info"><div class="callout-title">Why the numbers matter</div>
+      <p>24,000 QPS rules out "run a database query on every keystroke against a big table". 0.4 GB/day of new data is modest, which tells us storing the data is not the hard part; <em>answering fast</em> is.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step2-high-level-design">Step 2: High-level design</h2>
+    <p>At a high level the system is broken into two parts:</p>
+    <div class="cards">
+      <div class="card teal"><h4>Data gathering service</h4><p>Gathers user input queries and aggregates them in real time. (Real-time processing is not practical for large data sets, but it's a good starting point; we'll fix it in the deep dive.)</p></div>
+      <div class="card sky"><h4>Query service</h4><p>Given a search query or prefix, returns the 5 most frequently searched terms.</p></div>
+    </div>
+    <h3>Data gathering service (first version)</h3>
+    <p>Assume a frequency table stores the query string and its frequency. Watch it change as users search for "twitch", "twitter", "twitter" and "twillo":</p>
+    <div class="diagram"><div class="diagram-title">Frequency table updating as queries arrive</div>
+      <svg class="dg" viewBox="0 0 720 230">
+        <text x="90" y="25" text-anchor="middle" class="a">query: twitch</text>
+        <text x="270" y="25" text-anchor="middle" class="a">query: twitter</text>
+        <text x="450" y="25" text-anchor="middle" class="a">query: twitter</text>
+        <text x="630" y="25" text-anchor="middle" class="a">query: twillo</text>
+        <rect x="15" y="40" width="150" height="30" rx="4" class="fill-s"/><text x="90" y="60" text-anchor="middle" style="fill:#fff">Query | Freq</text>
+        <rect x="15" y="70" width="150" height="30" rx="0"/><text x="90" y="90" text-anchor="middle">twitch | 1</text>
+        <rect x="195" y="40" width="150" height="30" rx="4" class="fill-s"/><text x="270" y="60" text-anchor="middle" style="fill:#fff">Query | Freq</text>
+        <rect x="195" y="70" width="150" height="30" rx="0"/><text x="270" y="90" text-anchor="middle">twitch | 1</text>
+        <rect x="195" y="100" width="150" height="30" rx="0" class="g"/><text x="270" y="120" text-anchor="middle" class="g">twitter | 1</text>
+        <rect x="375" y="40" width="150" height="30" rx="4" class="fill-s"/><text x="450" y="60" text-anchor="middle" style="fill:#fff">Query | Freq</text>
+        <rect x="375" y="70" width="150" height="30" rx="0"/><text x="450" y="90" text-anchor="middle">twitch | 1</text>
+        <rect x="375" y="100" width="150" height="30" rx="0" class="g"/><text x="450" y="120" text-anchor="middle" class="g">twitter | 2</text>
+        <rect x="555" y="40" width="150" height="30" rx="4" class="fill-s"/><text x="630" y="60" text-anchor="middle" style="fill:#fff">Query | Freq</text>
+        <rect x="555" y="70" width="150" height="30" rx="0"/><text x="630" y="90" text-anchor="middle">twitch | 1</text>
+        <rect x="555" y="100" width="150" height="30" rx="0"/><text x="630" y="120" text-anchor="middle">twitter | 2</text>
+        <rect x="555" y="130" width="150" height="30" rx="0" class="g"/><text x="630" y="150" text-anchor="middle" class="g">twillo | 1</text>
+        <text x="360" y="205" text-anchor="middle" class="sm">Each search either inserts a new row with frequency 1 or increments an existing row</text>
+      </svg>
+      <div class="diagram-caption">Every incoming query updates the frequency table immediately. Green rows changed in that step.</div>
+    </div>
+    <h3>Query service (first version)</h3>
+    <p>Given a frequency table, when a user types "tw", the top 5 searched queries are displayed. To get them, run this SQL query:</p>
+<pre><code>SELECT * FROM frequency_table
+WHERE query LIKE 'tw%'
+ORDER BY frequency DESC
+LIMIT 5</code></pre>
+    <div class="diagram"><div class="diagram-title">Query service on a frequency table</div>
+      <div class="flow">
+        <div class="node accent">User types "tw"</div>
+        <div class="arrow">→<small>search?q=tw</small></div>
+        <div class="node sky">Query service<small>LIKE 'tw%' ORDER BY frequency DESC LIMIT 5</small></div>
+        <div class="arrow">→</div>
+        <div class="node db green">Frequency table<small>twitter 35, twitch 29, twilight 25, twin peak 21, twitch prime 18, ...</small></div>
+      </div>
+      <div class="diagram-caption">The simplest working design: scan the table for rows that start with the prefix, sort them by frequency, take the top 5.</div>
+    </div>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul><li>Trivial to build and explain.</li><li>Acceptable when the data set is small.</li></ul></div>
+      <div class="cons"><h4>Cons</h4><ul><li>When data is large, accessing the database becomes a bottleneck.</li><li>Running LIKE + ORDER BY at 24,000 QPS against billions of rows won't meet 100 ms.</li><li>Updating the table on every search adds heavy write load.</li></ul></div>
+    </div>
+    <div class="callout tip"><div class="callout-title">Interview tip</div>
+      <p>It is perfectly fine to propose this simple version first, then say "this won't scale, so in the deep dive I'll replace the table with a trie and move the updates offline". Interviewers like seeing you evolve a design.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-trie">Step 3: The trie data structure</h2>
+    <p>Relational databases are not efficient for fetching the top 5 queries for a prefix. The trie (prefix tree) is. Since it is fundamental to this design, let's build it up from zero.</p>
+    <h3>What is a trie?</h3>
+    <p>The name comes from the word re<strong>trie</strong>val, and it is designed for string retrieval. The main ideas:</p>
+    <ul>
+      <li>A trie is a <strong>tree-like</strong> data structure.</li>
+      <li>The <strong>root</strong> represents an empty string.</li>
+      <li>Each node stores a character and has up to <strong>26 children</strong>, one for each possible next character (we only allow a–z).</li>
+      <li>Each tree node represents a single word or a <strong>prefix string</strong>: the characters on the path from the root to that node.</li>
+    </ul>
+    <p>Below is a trie built from the queries <strong>tree, try, true, toy, wish, win</strong>. Follow any path from the root: each edge adds a letter. The words tree, true and wish share long prefixes, so they share nodes.</p>
+    <div class="diagram"><div class="diagram-title">A trie for: tree, try, true, toy, wish, win</div>
+      <svg class="dg" viewBox="0 0 760 440">
+      <line x1="435" y1="40" x2="280" y2="130"/>
+      <text x="346" y="89" text-anchor="middle" class="sm">t</text>
+      <line x1="435" y1="40" x2="590" y2="130"/>
+      <text x="524" y="89" text-anchor="middle" class="sm">w</text>
+      <line x1="280" y1="130" x2="180" y2="220"/>
+      <text x="218" y="179" text-anchor="middle" class="sm">r</text>
+      <line x1="280" y1="130" x2="380" y2="220"/>
+      <text x="342" y="179" text-anchor="middle" class="sm">o</text>
+      <line x1="590" y1="130" x2="590" y2="220"/>
+      <text x="578" y="179" text-anchor="middle" class="sm">i</text>
+      <line x1="180" y1="220" x2="80" y2="310"/>
+      <text x="118" y="269" text-anchor="middle" class="sm">e</text>
+      <line x1="180" y1="220" x2="180" y2="310"/>
+      <text x="168" y="269" text-anchor="middle" class="sm">y</text>
+      <line x1="180" y1="220" x2="280" y2="310"/>
+      <text x="242" y="269" text-anchor="middle" class="sm">u</text>
+      <line x1="380" y1="220" x2="380" y2="310"/>
+      <text x="368" y="269" text-anchor="middle" class="sm">y</text>
+      <line x1="590" y1="220" x2="530" y2="310"/>
+      <text x="548" y="269" text-anchor="middle" class="sm">s</text>
+      <line x1="590" y1="220" x2="650" y2="310"/>
+      <text x="632" y="269" text-anchor="middle" class="sm">n</text>
+      <line x1="80" y1="310" x2="80" y2="400"/>
+      <text x="68" y="359" text-anchor="middle" class="sm">e</text>
+      <line x1="280" y1="310" x2="280" y2="400"/>
+      <text x="268" y="359" text-anchor="middle" class="sm">e</text>
+      <line x1="530" y1="310" x2="530" y2="400"/>
+      <text x="518" y="359" text-anchor="middle" class="sm">h</text>
+      <circle cx="435" cy="40" r="22"/>
+      <text x="435" y="44" text-anchor="middle" style="font-size:12px">root</text>
+      <circle cx="280" cy="130" r="22"/>
+      <text x="280" y="134" text-anchor="middle">t</text>
+      <circle cx="590" cy="130" r="22"/>
+      <text x="590" y="134" text-anchor="middle">w</text>
+      <circle cx="180" cy="220" r="22"/>
+      <text x="180" y="224" text-anchor="middle">tr</text>
+      <circle cx="380" cy="220" r="22"/>
+      <text x="380" y="224" text-anchor="middle">to</text>
+      <circle cx="590" cy="220" r="22"/>
+      <text x="590" y="224" text-anchor="middle">wi</text>
+      <circle cx="80" cy="310" r="22"/>
+      <text x="80" y="314" text-anchor="middle">tre</text>
+      <circle cx="180" cy="310" r="22" class="g"/>
+      <text x="180" y="314" text-anchor="middle">try</text>
+      <circle cx="280" cy="310" r="22"/>
+      <text x="280" y="314" text-anchor="middle">tru</text>
+      <circle cx="380" cy="310" r="22" class="g"/>
+      <text x="380" y="314" text-anchor="middle">toy</text>
+      <circle cx="530" cy="310" r="22"/>
+      <text x="530" y="314" text-anchor="middle">wis</text>
+      <circle cx="650" cy="310" r="22" class="g"/>
+      <text x="650" y="314" text-anchor="middle">win</text>
+      <circle cx="80" cy="400" r="22" class="g"/>
+      <text x="80" y="404" text-anchor="middle" style="font-size:12px">tree</text>
+      <circle cx="280" cy="400" r="22" class="g"/>
+      <text x="280" y="404" text-anchor="middle" style="font-size:12px">true</text>
+      <circle cx="530" cy="400" r="22" class="g"/>
+      <text x="530" y="404" text-anchor="middle" style="font-size:12px">wish</text>
+      </svg>
+      <div class="diagram-caption">Each edge is one character; each node is the prefix spelled out on the path from the root. Highlighted (green) nodes are complete search queries. "tr" is shared by tree, try and true.</div>
+    </div>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>A trie is like a phone menu: "press t, then r, then u...". Each press narrows the options. After you've pressed "t", "r", you are standing in the part of the menu where every remaining option starts with "tr". You never look at anything starting with "w".</p>
+    </div>
+
+    <h3>Adding frequency</h3>
+    <p>To support sorting by popularity, frequency information must be included in nodes. Suppose we have this frequency table:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Query</th><th>Frequency</th></tr>
+      <tr><td>tree</td><td>10</td></tr><tr><td>try</td><td>29</td></tr><tr><td>true</td><td>35</td></tr><tr><td>toy</td><td>14</td></tr><tr><td>wish</td><td>25</td></tr><tr><td>win</td><td>50</td></tr>
+    </table></div>
+    <p>After adding frequency info to the nodes that represent complete queries, the trie looks like this:</p>
+    <div class="diagram"><div class="diagram-title">Trie with frequencies stored in nodes</div>
+      <svg class="dg" viewBox="0 0 760 440">
+      <line x1="435" y1="40" x2="280" y2="130" class="s"/>
+      <text x="346" y="89" text-anchor="middle" class="sm">t</text>
+      <line x1="435" y1="40" x2="590" y2="130"/>
+      <text x="524" y="89" text-anchor="middle" class="sm">w</text>
+      <line x1="280" y1="130" x2="180" y2="220" class="s"/>
+      <text x="218" y="179" text-anchor="middle" class="sm">r</text>
+      <line x1="280" y1="130" x2="380" y2="220"/>
+      <text x="342" y="179" text-anchor="middle" class="sm">o</text>
+      <line x1="590" y1="130" x2="590" y2="220"/>
+      <text x="578" y="179" text-anchor="middle" class="sm">i</text>
+      <line x1="180" y1="220" x2="80" y2="310" class="s"/>
+      <text x="118" y="269" text-anchor="middle" class="sm">e</text>
+      <line x1="180" y1="220" x2="180" y2="310" class="s"/>
+      <text x="168" y="269" text-anchor="middle" class="sm">y</text>
+      <line x1="180" y1="220" x2="280" y2="310" class="s"/>
+      <text x="242" y="269" text-anchor="middle" class="sm">u</text>
+      <line x1="380" y1="220" x2="380" y2="310"/>
+      <text x="368" y="269" text-anchor="middle" class="sm">y</text>
+      <line x1="590" y1="220" x2="530" y2="310"/>
+      <text x="548" y="269" text-anchor="middle" class="sm">s</text>
+      <line x1="590" y1="220" x2="650" y2="310"/>
+      <text x="632" y="269" text-anchor="middle" class="sm">n</text>
+      <line x1="80" y1="310" x2="80" y2="400" class="s"/>
+      <text x="68" y="359" text-anchor="middle" class="sm">e</text>
+      <line x1="280" y1="310" x2="280" y2="400" class="s"/>
+      <text x="268" y="359" text-anchor="middle" class="sm">e</text>
+      <line x1="530" y1="310" x2="530" y2="400"/>
+      <text x="518" y="359" text-anchor="middle" class="sm">h</text>
+      <circle cx="435" cy="40" r="22" class="s"/>
+      <text x="435" y="44" text-anchor="middle" style="font-size:12px">root</text>
+      <circle cx="280" cy="130" r="22" class="s"/>
+      <text x="280" y="134" text-anchor="middle">t</text>
+      <circle cx="590" cy="130" r="22"/>
+      <text x="590" y="134" text-anchor="middle">w</text>
+      <circle cx="180" cy="220" r="22" class="s"/>
+      <text x="180" y="224" text-anchor="middle">tr</text>
+      <circle cx="380" cy="220" r="22"/>
+      <text x="380" y="224" text-anchor="middle">to</text>
+      <circle cx="590" cy="220" r="22"/>
+      <text x="590" y="224" text-anchor="middle">wi</text>
+      <circle cx="80" cy="310" r="22" class="s"/>
+      <text x="80" y="314" text-anchor="middle">tre</text>
+      <circle cx="180" cy="310" r="22" class="s" style="stroke-width:3"/>
+      <text x="180" y="314" text-anchor="middle">try</text>
+      <text x="206" y="315" class="g">:29</text>
+      <circle cx="280" cy="310" r="22" class="s"/>
+      <text x="280" y="314" text-anchor="middle">tru</text>
+      <circle cx="380" cy="310" r="22" class="g"/>
+      <text x="380" y="314" text-anchor="middle">toy</text>
+      <text x="406" y="315" class="g">:14</text>
+      <circle cx="530" cy="310" r="22"/>
+      <text x="530" y="314" text-anchor="middle">wis</text>
+      <circle cx="650" cy="310" r="22" class="g"/>
+      <text x="650" y="314" text-anchor="middle">win</text>
+      <text x="676" y="315" class="g">:50</text>
+      <circle cx="80" cy="400" r="22" class="s" style="stroke-width:3"/>
+      <text x="80" y="404" text-anchor="middle" style="font-size:12px">tree</text>
+      <text x="106" y="405" class="g">:10</text>
+      <circle cx="280" cy="400" r="22" class="s" style="stroke-width:3"/>
+      <text x="280" y="404" text-anchor="middle" style="font-size:12px">true</text>
+      <text x="306" y="405" class="g">:35</text>
+      <circle cx="530" cy="400" r="22" class="g"/>
+      <text x="530" y="404" text-anchor="middle" style="font-size:12px">wish</text>
+      <text x="556" y="405" class="g">:25</text>
+      </svg>
+      <div class="diagram-caption">Every complete query node now carries its frequency (shown as ":number"). The blue path and subtree show the worked example for the prefix "tr".</div>
+    </div>
+
+    <h3>How autocomplete works on a trie</h3>
+    <p>Some terms first: <strong>p</strong> = length of the prefix, <strong>n</strong> = total number of nodes in the trie, <strong>c</strong> = number of children (all descendants) of a given node.</p>
+    <p>Steps to get the top k most searched queries:</p>
+    <ol class="steps">
+      <li><strong>Find the prefix.</strong> Walk down from the root one character at a time. Time complexity: <strong>O(p)</strong>.</li>
+      <li><strong>Traverse the subtree</strong> from the prefix node to get all valid children (a child is valid if it can form a valid query string). Time complexity: <strong>O(c)</strong>.</li>
+      <li><strong>Sort the children and get the top k.</strong> Time complexity: <strong>O(c log c)</strong>.</li>
+    </ol>
+    <div class="callout key"><div class="callout-title">Worked example: prefix "tr", k = 2</div>
+      <ol>
+        <li>Find the prefix node "tr": root → t → tr (2 steps, because p = 2).</li>
+        <li>Traverse the subtree under "tr" and collect all valid queries: <strong>tree: 10, true: 35, try: 29</strong>.</li>
+        <li>Sort by frequency: true 35, try 29, tree 10. Take the top 2: <strong>true: 35, try: 29</strong>.</li>
+      </ol>
+    </div>
+    <p>The time complexity of this algorithm is the sum of the steps: <strong>O(p) + O(c) + O(c log c)</strong>. It is straightforward, but too slow because in the worst case we traverse the <em>entire</em> trie to get the top k results. (Imagine the prefix is "a": the subtree under "a" could contain millions of queries.) Two optimizations fix this.</p>
+
+    <h3>Optimization 1: limit the max length of a prefix</h3>
+    <p>Users rarely type a long search query into the search box. So it is safe to say p is a small integer, say <strong>50</strong>. If we limit the length of a prefix, the time complexity for "find the prefix" drops from O(p) to <strong>O(small constant)</strong>, i.e. <strong>O(1)</strong>.</p>
+
+    <h3>Optimization 2: cache top search queries at each node</h3>
+    <p>To avoid traversing the whole trie, store the top k most frequently used queries <strong>at each node</strong>. Since 5 to 10 autocomplete suggestions are enough for users, k is a relatively small number. In our specific case, only the top 5 search queries are cached.</p>
+    <p>By caching top search queries at every node, we significantly reduce the time complexity to retrieve the top 5 queries. However, this design requires a lot of space to store top queries at every node. <strong>Trading space for time is well worth it</strong>, as fast response time is very important.</p>
+    <div class="diagram"><div class="diagram-title">Trie with top-k cached at every node (k = 2 for readability)</div>
+      <svg class="dg" viewBox="0 0 760 440">
+      <line x1="435" y1="40" x2="280" y2="130"/>
+      <text x="346" y="89" text-anchor="middle" class="sm">t</text>
+      <line x1="435" y1="40" x2="590" y2="130"/>
+      <text x="524" y="89" text-anchor="middle" class="sm">w</text>
+      <line x1="280" y1="130" x2="180" y2="220"/>
+      <text x="218" y="179" text-anchor="middle" class="sm">r</text>
+      <line x1="280" y1="130" x2="380" y2="220"/>
+      <text x="342" y="179" text-anchor="middle" class="sm">o</text>
+      <line x1="590" y1="130" x2="590" y2="220"/>
+      <text x="578" y="179" text-anchor="middle" class="sm">i</text>
+      <line x1="180" y1="220" x2="80" y2="310"/>
+      <text x="118" y="269" text-anchor="middle" class="sm">e</text>
+      <line x1="180" y1="220" x2="180" y2="310"/>
+      <text x="168" y="269" text-anchor="middle" class="sm">y</text>
+      <line x1="180" y1="220" x2="280" y2="310"/>
+      <text x="242" y="269" text-anchor="middle" class="sm">u</text>
+      <line x1="380" y1="220" x2="380" y2="310"/>
+      <text x="368" y="269" text-anchor="middle" class="sm">y</text>
+      <line x1="590" y1="220" x2="530" y2="310"/>
+      <text x="548" y="269" text-anchor="middle" class="sm">s</text>
+      <line x1="590" y1="220" x2="650" y2="310"/>
+      <text x="632" y="269" text-anchor="middle" class="sm">n</text>
+      <line x1="80" y1="310" x2="80" y2="400"/>
+      <text x="68" y="359" text-anchor="middle" class="sm">e</text>
+      <line x1="280" y1="310" x2="280" y2="400"/>
+      <text x="268" y="359" text-anchor="middle" class="sm">e</text>
+      <line x1="530" y1="310" x2="530" y2="400"/>
+      <text x="518" y="359" text-anchor="middle" class="sm">h</text>
+      <circle cx="435" cy="40" r="22"/>
+      <text x="435" y="44" text-anchor="middle" style="font-size:12px">root</text>
+      <text x="461" y="37" class="sm">win:50</text>
+      <text x="461" y="51" class="sm">true:35</text>
+      <circle cx="280" cy="130" r="22"/>
+      <text x="280" y="134" text-anchor="middle">t</text>
+      <text x="306" y="127" class="sm">true:35</text>
+      <text x="306" y="141" class="sm">try:29</text>
+      <circle cx="590" cy="130" r="22"/>
+      <text x="590" y="134" text-anchor="middle">w</text>
+      <text x="616" y="127" class="sm">win:50</text>
+      <text x="616" y="141" class="sm">wish:25</text>
+      <circle cx="180" cy="220" r="22"/>
+      <text x="180" y="224" text-anchor="middle">tr</text>
+      <text x="206" y="217" class="sm">true:35</text>
+      <text x="206" y="231" class="sm">try:29</text>
+      <circle cx="380" cy="220" r="22"/>
+      <text x="380" y="224" text-anchor="middle">to</text>
+      <text x="406" y="217" class="sm">toy:14</text>
+      <circle cx="590" cy="220" r="22"/>
+      <text x="590" y="224" text-anchor="middle">wi</text>
+      <text x="616" y="217" class="sm">win:50</text>
+      <text x="616" y="231" class="sm">wish:25</text>
+      <circle cx="80" cy="310" r="22"/>
+      <text x="80" y="314" text-anchor="middle">tre</text>
+      <text x="106" y="307" class="sm">tree:10</text>
+      <circle cx="180" cy="310" r="22" class="g"/>
+      <text x="180" y="314" text-anchor="middle">try</text>
+      <text x="206" y="307" class="sm">try:29</text>
+      <circle cx="280" cy="310" r="22"/>
+      <text x="280" y="314" text-anchor="middle">tru</text>
+      <text x="306" y="307" class="sm">true:35</text>
+      <circle cx="380" cy="310" r="22" class="g"/>
+      <text x="380" y="314" text-anchor="middle">toy</text>
+      <text x="406" y="307" class="sm">toy:14</text>
+      <circle cx="530" cy="310" r="22"/>
+      <text x="530" y="314" text-anchor="middle">wis</text>
+      <text x="556" y="307" class="sm">wish:25</text>
+      <circle cx="650" cy="310" r="22" class="g"/>
+      <text x="650" y="314" text-anchor="middle">win</text>
+      <text x="676" y="307" class="sm">win:50</text>
+      <circle cx="80" cy="400" r="22" class="g"/>
+      <text x="80" y="404" text-anchor="middle" style="font-size:12px">tree</text>
+      <text x="106" y="397" class="sm">tree:10</text>
+      <circle cx="280" cy="400" r="22" class="g"/>
+      <text x="280" y="404" text-anchor="middle" style="font-size:12px">true</text>
+      <text x="306" y="397" class="sm">true:35</text>
+      <circle cx="530" cy="400" r="22" class="g"/>
+      <text x="530" y="404" text-anchor="middle" style="font-size:12px">wish</text>
+      <text x="556" y="397" class="sm">wish:25</text>
+      </svg>
+      <div class="diagram-caption">Each node stores a small pre-sorted list of the best queries in its subtree. To answer prefix "tr", jump to the "tr" node and read [true:35, try:29]. No traversal, no sorting.</div>
+    </div>
+    <p>After applying both optimizations:</p>
+    <ol class="steps">
+      <li><strong>Find the prefix node:</strong> O(1), because the prefix length is capped.</li>
+      <li><strong>Return the top k:</strong> O(1), because the result is already cached at that node.</li>
+    </ol>
+    <p>As the time complexity for each step is reduced to O(1), our algorithm takes only <strong>O(1)</strong> to fetch the top k queries.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Step</th><th>Naive trie</th><th>Optimized trie</th></tr>
+      <tr><td>Find prefix</td><td>O(p)</td><td>O(1) (p capped at e.g. 50)</td></tr>
+      <tr><td>Collect candidates</td><td>O(c)</td><td>not needed</td></tr>
+      <tr><td>Sort</td><td>O(c log c)</td><td>not needed (pre-sorted cache)</td></tr>
+      <tr><td>Total</td><td>O(p) + O(c) + O(c log c)</td><td>O(1)</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="step3-data-gathering">Step 3: Data gathering service (redesigned)</h2>
+    <p>In the first version, whenever a user typed a search query, data was updated in real time. That approach is not practical, for two reasons:</p>
+    <ul>
+      <li><strong>Users may enter billions of queries per day.</strong> Updating the trie on every query significantly slows down the query service.</li>
+      <li><strong>Top suggestions may not change much once the trie is built.</strong> So it is unnecessary to update the trie frequently.</li>
+    </ul>
+    <p>Real-time applications (like Twitter) need fresh suggestions, but for many other use cases like Google keywords, autocomplete suggestions may not change much on a daily basis. Either way, the foundation stays the same: <strong>the data used to build the trie usually comes from analytics or logging services.</strong></p>
+    <div class="diagram"><div class="diagram-title">Redesigned data gathering pipeline</div>
+      <div class="flow">
+        <div class="node">Analytics logs<small>raw (query, time)</small></div>
+        <div class="arrow">→</div>
+        <div class="node yellow">Aggregators</div>
+        <div class="arrow">→</div>
+        <div class="node">Aggregated data<small>(query, week, frequency)</small></div>
+        <div class="arrow">→</div>
+        <div class="node purple">Workers<small>build trie</small></div>
+        <div class="arrow">→</div>
+        <div class="node db green">Trie DB</div>
+        <div class="arrow">→<small>weekly snapshot</small></div>
+        <div class="node db sky">Trie cache</div>
+      </div>
+      <div class="diagram-caption">Raw logs are rolled up into weekly counts, workers build the trie offline, the trie is stored in the trie DB, and a snapshot is loaded into memory (trie cache) for fast reads.</div>
+    </div>
+    <h3>Each component, one by one</h3>
+    <p><strong>Analytics logs.</strong> Store raw data about search queries. Logs are append-only and not indexed. Example:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>query</th><th>time</th></tr>
+      <tr><td>tree</td><td>2019-10-01 22:01:01</td></tr>
+      <tr><td>try</td><td>2019-10-01 22:01:05</td></tr>
+      <tr><td>tree</td><td>2019-10-01 22:01:30</td></tr>
+      <tr><td>toy</td><td>2019-10-01 22:02:22</td></tr>
+      <tr><td>tree</td><td>2019-10-02 22:02:42</td></tr>
+      <tr><td>try</td><td>2019-10-03 22:03:03</td></tr>
+    </table></div>
+    <p><strong>Aggregators.</strong> The size of the logs is usually very large and the data is not in the right format, so we aggregate it for easy processing. Depending on the use case, we aggregate differently. For real-time applications such as Twitter, aggregate in a shorter time interval because real-time results are important. For many other use cases, aggregating less frequently, say <strong>once per week</strong>, might be good enough. In an interview, verify whether real-time results are important.</p>
+    <p><strong>Aggregated data.</strong> The "time" field is the start time of a week; "frequency" is the sum of occurrences of that query in that week:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>query</th><th>time (week start)</th><th>frequency</th></tr>
+      <tr><td>tree</td><td>2019-10-01</td><td>12000</td></tr>
+      <tr><td>tree</td><td>2019-10-08</td><td>15000</td></tr>
+      <tr><td>tree</td><td>2019-10-15</td><td>9000</td></tr>
+      <tr><td>toy</td><td>2019-10-01</td><td>8500</td></tr>
+      <tr><td>toy</td><td>2019-10-08</td><td>6256</td></tr>
+      <tr><td>toy</td><td>2019-10-15</td><td>8866</td></tr>
+    </table></div>
+    <p><strong>Workers.</strong> A set of servers that perform asynchronous jobs at regular intervals. They build the trie data structure and store it in the trie DB.</p>
+    <p><strong>Trie cache.</strong> A distributed cache system that keeps the trie in memory for fast reads. It takes a <strong>weekly snapshot</strong> of the DB.</p>
+    <p><strong>Trie DB.</strong> Persistent storage. Two options:</p>
+    <div class="cards">
+      <div class="card purple"><h4>Option 1: Document store</h4><p>Since a new trie is built weekly, we can periodically take a snapshot of it, serialize it and store the serialized data in the database. Document stores like <strong>MongoDB</strong> are good fits for serialized data.</p></div>
+      <div class="card teal"><h4>Option 2: Key-value store</h4><p>A trie can be represented in hash table form: every prefix in the trie is mapped to a key in the hash table; data on each trie node is mapped to a value in the hash table.</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Mapping a trie to a key-value store</div>
+      <svg class="dg" viewBox="0 0 720 300">
+        <defs><marker id="c13-kv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <line x1="130" y1="40" x2="130" y2="120"/>
+        <line x1="130" y1="120" x2="70" y2="210"/>
+        <line x1="130" y1="120" x2="190" y2="210"/>
+        <circle cx="130" cy="40" r="22"/><text x="130" y="44" text-anchor="middle" style="font-size:12px">root</text>
+        <circle cx="130" cy="120" r="22" class="s"/><text x="130" y="124" text-anchor="middle">t</text>
+        <circle cx="70" cy="210" r="22" class="s"/><text x="70" y="214" text-anchor="middle">tr</text>
+        <circle cx="190" cy="210" r="22" class="s"/><text x="190" y="214" text-anchor="middle">to</text>
+        <text x="130" y="275" text-anchor="middle" class="sm">trie nodes (part of it)</text>
+        <rect x="380" y="20" width="320" height="34" rx="4" class="fill-s"/>
+        <text x="450" y="42" text-anchor="middle" style="fill:#fff">Key</text><text x="600" y="42" text-anchor="middle" style="fill:#fff">Value</text>
+        <rect x="380" y="54" width="320" height="50" rx="0"/><text x="450" y="84" text-anchor="middle">t</text><text x="600" y="84" text-anchor="middle" class="sm">[true:35, try:29, toy:14, tree:10]</text>
+        <rect x="380" y="104" width="320" height="50" rx="0"/><text x="450" y="134" text-anchor="middle">tr</text><text x="600" y="134" text-anchor="middle" class="sm">[true:35, try:29, tree:10]</text>
+        <rect x="380" y="154" width="320" height="50" rx="0"/><text x="450" y="184" text-anchor="middle">to</text><text x="600" y="184" text-anchor="middle" class="sm">[toy:14]</text>
+        <rect x="380" y="204" width="320" height="50" rx="0"/><text x="450" y="234" text-anchor="middle">...</text><text x="600" y="234" text-anchor="middle" class="sm">one row per prefix</text>
+        <line x1="520" y1="20" x2="520" y2="254"/>
+        <path d="M152,120 C250,110 300,80 378,79" class="s" marker-end="url(#c13-kv)"/>
+        <path d="M92,210 C200,250 300,140 378,129" class="s" marker-end="url(#c13-kv)"/>
+        <path d="M212,210 C280,200 320,180 378,179" class="s" marker-end="url(#c13-kv)"/>
+      </svg>
+      <div class="diagram-caption">Each trie node becomes one key-value pair: the prefix is the key, and the node's data (its cached top queries) is the value. Looking up a prefix becomes a single hash-table get.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-query-service">Step 3: Query service (redesigned)</h2>
+    <p>In the high-level design, the query service called the database directly to fetch the top 5 results. The improved design:</p>
+    <div class="diagram"><div class="diagram-title">Improved query service</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">User<small>web / mobile</small></div></div>
+        <div class="arch-down">↓<small>1. search query sent</small></div>
+        <div class="arch-row"><div class="node sky">Load balancer</div></div>
+        <div class="arch-down">↓<small>2. route</small></div>
+        <div class="arch-row"><div class="node sky">API servers</div></div>
+        <div class="arch-down">↓<small>3. read</small></div>
+        <div class="arch-row"><div class="node db green">Trie cache<small>in memory</small></div></div>
+        <div class="arch-down">↓<small>4. on cache miss: fetch + replenish cache</small></div>
+        <div class="arch-row"><div class="node db purple">Trie DB</div></div>
+      </div>
+      <div class="diagram-caption">Most requests are answered straight from memory. Only cache misses go to the trie DB.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>A search query is sent to the load balancer.</strong></li>
+      <li><strong>The load balancer routes the request to API servers.</strong></li>
+      <li><strong>API servers get trie data from the trie cache</strong> and construct autocomplete suggestions for the client.</li>
+      <li><strong>If the data is not in the trie cache, we replenish it from the trie DB.</strong> This way, all subsequent requests for the same prefix are returned from the cache. A cache miss can happen when a cache server is out of memory or offline.</li>
+    </ol>
+    <p>Query service requires lightning-fast speed. The book proposes these optimizations:</p>
+    <div class="cards">
+      <div class="card sky"><h4>AJAX request</h4><p>For web applications, browsers usually send AJAX requests to fetch autocomplete results. The main benefit is that sending or receiving a request/response does not refresh the whole web page.</p></div>
+      <div class="card green"><h4>Browser caching</h4><p>For many applications, suggestions may not change much within a short time, so they can be saved in the browser cache. Subsequent requests get results directly from the cache. Google search uses this: the response header contains <code>cache-control: private, max-age=3600</code>.</p></div>
+      <div class="card yellow"><h4>Data sampling</h4><p>For a large-scale system, logging every search query requires a lot of processing power and storage. Data sampling is important: only 1 out of every N requests is logged by the system.</p></div>
+    </div>
+    <div class="callout info"><div class="callout-title">Decoding the Google header</div>
+      <p><code>private</code> means results are intended for a single user and must not be cached by a shared cache. <code>max-age=3600</code> means the cache is valid for 3,600 seconds, i.e. one hour. So if you type "din" twice within an hour, the second time your browser answers by itself, without touching the servers.</p>
+    </div>
+    <div class="diagram"><div class="diagram-title">Browser cache short-circuits repeat requests</div>
+      <svg class="dg" viewBox="0 0 700 220">
+        <defs><marker id="c13-bc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="80" width="120" height="50" rx="8" class="a"/><text x="80" y="110" text-anchor="middle">Browser</text>
+        <rect x="270" y="80" width="140" height="50" rx="8" class="g"/><text x="340" y="102" text-anchor="middle">Browser cache</text><text x="340" y="120" text-anchor="middle" class="sm">max-age=3600</text>
+        <rect x="540" y="80" width="140" height="50" rx="8" class="s"/><text x="610" y="110" text-anchor="middle">Servers</text>
+        <line x1="140" y1="95" x2="268" y2="95" marker-end="url(#c13-bc)"/><text x="204" y="85" text-anchor="middle" class="sm">"din"</text>
+        <line x1="410" y1="95" x2="538" y2="95" class="r" marker-end="url(#c13-bc)"/><text x="474" y="85" text-anchor="middle" class="r">miss (1st time)</text>
+        <line x1="268" y1="118" x2="142" y2="118" class="g" marker-end="url(#c13-bc)"/><text x="204" y="145" text-anchor="middle" class="g">hit (within 1 hour)</text>
+        <text x="350" y="195" text-anchor="middle" class="sm">The second "din" in the hour never leaves the user's machine</text>
+      </svg>
+      <div class="diagram-caption">The first request goes to the servers and the response is cached; repeats within max-age are served locally.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-trie-operations">Step 3: Trie operations</h2>
+    <p>The trie is the core component of the system. Let's look at how it is created, updated and deleted.</p>
+    <h3>Create</h3>
+    <p>The trie is created by <strong>workers</strong> using aggregated data. The source of data is the analytics log / database.</p>
+    <h3>Update</h3>
+    <p>There are two ways to update the trie:</p>
+    <div class="cards">
+      <div class="card green"><h4>Option 1: Update weekly</h4><p>Once a new trie is created, the new trie replaces the old one. This is the recommended approach.</p></div>
+      <div class="card yellow"><h4>Option 2: Update each node directly</h4><p>We try to avoid this because it is slow. If the trie is small, it is an acceptable solution. When we update a trie node, its ancestors all the way up to the root must be updated, because ancestors store the top queries of their children.</p></div>
+    </div>
+    <p>Here is an example of why ancestors must change. Suppose the frequency of "try" rises from 29 to 40:</p>
+    <div class="diagram"><div class="diagram-title">Updating one node ripples up to the root</div>
+      <svg class="dg" viewBox="0 0 720 360">
+        <defs><marker id="c13-up" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <text x="200" y="22" text-anchor="middle" class="sm">BEFORE</text>
+        <text x="540" y="22" text-anchor="middle" class="sm">AFTER (try: 29 to 40)</text>
+        <line x1="120" y1="55" x2="120" y2="135"/><line x1="120" y1="135" x2="120" y2="215"/><line x1="120" y1="215" x2="120" y2="295"/>
+        <circle cx="120" cy="55" r="22"/><text x="120" y="59" text-anchor="middle" style="font-size:12px">root</text>
+        <circle cx="120" cy="135" r="22"/><text x="120" y="139" text-anchor="middle">t</text>
+        <circle cx="120" cy="215" r="22"/><text x="120" y="219" text-anchor="middle">tr</text>
+        <circle cx="120" cy="295" r="22" class="g"/><text x="120" y="299" text-anchor="middle">try</text>
+        <text x="150" y="52" class="sm">[win:50, true:35]</text>
+        <text x="150" y="132" class="sm">[true:35, try:29]</text>
+        <text x="150" y="212" class="sm">[true:35, try:29]</text>
+        <text x="150" y="292" class="sm">[try:29]</text>
+        <line x1="400" y1="55" x2="400" y2="135" class="r"/><line x1="400" y1="135" x2="400" y2="215" class="r"/><line x1="400" y1="215" x2="400" y2="295" class="r"/>
+        <circle cx="400" cy="55" r="22" class="r"/><text x="400" y="59" text-anchor="middle" style="font-size:12px">root</text>
+        <circle cx="400" cy="135" r="22" class="r"/><text x="400" y="139" text-anchor="middle">t</text>
+        <circle cx="400" cy="215" r="22" class="r"/><text x="400" y="219" text-anchor="middle">tr</text>
+        <circle cx="400" cy="295" r="22" class="r"/><text x="400" y="299" text-anchor="middle">try</text>
+        <text x="430" y="52" class="r">[win:50, try:40]</text>
+        <text x="430" y="132" class="r">[try:40, true:35]</text>
+        <text x="430" y="212" class="r">[try:40, true:35]</text>
+        <text x="430" y="292" class="r">[try:40]</text>
+        <path d="M660,290 L660,60" class="r" marker-end="url(#c13-up)"/>
+        <text x="675" y="180" class="r" transform="rotate(-90 675 180)" text-anchor="middle">update ripples up</text>
+      </svg>
+      <div class="diagram-caption">Changing one query's frequency changes the cached top-k list of every ancestor (shown with k = 2). That is why per-node updates are slow and the weekly rebuild is preferred.</div>
+    </div>
+    <h3>Delete</h3>
+    <p>We have to remove hateful, violent, sexually explicit or dangerous autocomplete suggestions. We add a <strong>filter layer</strong> in front of the trie cache to filter out unwanted suggestions. Having a filter layer gives us the flexibility of removing results based on different filter rules. Unwanted suggestions are <strong>physically removed from the database asynchronously</strong>, so the correct data set will be used to build the trie in the next update cycle.</p>
+    <div class="diagram"><div class="diagram-title">Filter layer</div>
+      <div class="flow">
+        <div class="node sky">API servers</div>
+        <div class="arrow">→</div>
+        <div class="node red">Filter layer<small>remove unwanted suggestions</small></div>
+        <div class="arrow">→</div>
+        <div class="node db green">Trie cache</div>
+        <div class="arrow">→</div>
+        <div class="node db purple">Trie DB<small>bad entries removed async</small></div>
+      </div>
+      <div class="diagram-caption">The filter hides bad suggestions immediately; the database is cleaned in the background so the next weekly trie no longer contains them.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step3-scale-storage">Step 3: Scale the storage</h2>
+    <p>Now that the system brings autocomplete queries to users, it's time to solve the scalability issue when the trie grows too large to fit in one server. Since English is the only supported language, a naive way to shard is <strong>based on the first character</strong>:</p>
+    <ul>
+      <li>If we need two servers for storage, store queries starting with <strong>'a' to 'm'</strong> on the first server and <strong>'n' to 'z'</strong> on the second.</li>
+      <li>If we need three servers: 'a' to 'i', 'j' to 'r', and 's' to 'z'.</li>
+    </ul>
+    <p>Following this logic, we can split queries up to <strong>26 servers</strong> because there are 26 alphabetic characters in English. Let's define sharding based on the first character as first-level sharding. To store data beyond 26 servers, we can shard on the second or even the third level. For example, data queries that start with 'a' can be split into 4 servers: 'aa-ag', 'ah-an', 'ao-au' and 'av-az'.</p>
+    <div class="diagram"><div class="diagram-title">Naive sharding by first letter and the uneven-load problem</div>
+      <svg class="dg" viewBox="0 0 720 230">
+        <text x="360" y="22" text-anchor="middle" class="sm">Illustrative share of queries per first letter (not real data)</text>
+        <line x1="40" y1="190" x2="700" y2="190"/>
+        <rect x="60" y="60" width="60" height="130" rx="4" class="fill-r"/><text x="90" y="210" text-anchor="middle">c</text>
+        <rect x="140" y="80" width="60" height="110" rx="4" class="fill-y"/><text x="170" y="210" text-anchor="middle">s</text>
+        <rect x="220" y="110" width="60" height="80" rx="4" class="fill-s"/><text x="250" y="210" text-anchor="middle">t</text>
+        <rect x="300" y="125" width="60" height="65" rx="4" class="fill-s"/><text x="330" y="210" text-anchor="middle">m</text>
+        <rect x="380" y="160" width="60" height="30" rx="4" class="fill-g"/><text x="410" y="210" text-anchor="middle">u</text>
+        <rect x="460" y="172" width="60" height="18" rx="4" class="fill-g"/><text x="490" y="210" text-anchor="middle">y</text>
+        <rect x="540" y="180" width="60" height="10" rx="4" class="fill-g"/><text x="570" y="210" text-anchor="middle">x</text>
+        <rect x="620" y="182" width="60" height="8" rx="4" class="fill-g"/><text x="650" y="210" text-anchor="middle">z</text>
+        <text x="90" y="52" text-anchor="middle" class="r">hot shard</text>
+        <text x="610" y="160" text-anchor="middle" class="g">nearly idle shards</text>
+      </svg>
+      <div class="diagram-caption">One server per letter gives very uneven load: there are a lot more words that start with 'c' than with 'x'.</div>
+    </div>
+    <p>At first glance this approach seems reasonable, until you realize that there are a lot more words that start with the letter 'c' than 'x'. This creates <strong>uneven distribution</strong>.</p>
+    <p>To mitigate the data imbalance problem, we <strong>analyze historical data distribution pattern</strong> and apply smarter sharding logic. The <strong>shard map manager</strong> maintains a lookup database for identifying where rows should be stored. For example, if there are a similar number of historical queries for <strong>'s'</strong> and for <strong>'u', 'v', 'w', 'x', 'y' and 'z' combined</strong>, we can maintain two shards: one for 's' and one for 'u' to 'z'.</p>
+    <div class="diagram"><div class="diagram-title">Shard map manager</div>
+      <svg class="dg" viewBox="0 0 720 260">
+        <defs><marker id="c13-sm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="105" width="120" height="50" rx="8" class="s"/><text x="80" y="135" text-anchor="middle">Web servers</text>
+        <rect x="230" y="20" width="200" height="90" rx="8" class="y"/><text x="330" y="45" text-anchor="middle">Shard map manager</text>
+        <text x="330" y="68" text-anchor="middle" class="sm">s → shard 1</text><text x="330" y="86" text-anchor="middle" class="sm">u–z → shard 2</text><text x="330" y="102" text-anchor="middle" class="sm">... → shard N</text>
+        <rect x="540" y="30" width="160" height="50" rx="8" class="g"/><text x="620" y="52" text-anchor="middle">Shard 1</text><text x="620" y="70" text-anchor="middle" class="sm">'s'</text>
+        <rect x="540" y="110" width="160" height="50" rx="8" class="g"/><text x="620" y="132" text-anchor="middle">Shard 2</text><text x="620" y="150" text-anchor="middle" class="sm">'u' to 'z'</text>
+        <rect x="540" y="190" width="160" height="50" rx="8" class="g"/><text x="620" y="212" text-anchor="middle">Shard N</text><text x="620" y="230" text-anchor="middle" class="sm">other ranges</text>
+        <line x1="140" y1="118" x2="228" y2="75" marker-end="url(#c13-sm)"/><text x="160" y="85" class="sm">1. which shard?</text>
+        <line x1="228" y1="95" x2="142" y2="135" marker-end="url(#c13-sm)"/><text x="200" y="140" class="sm">2. shard 2</text>
+        <path d="M140,145 C300,230 420,150 538,135" class="a" marker-end="url(#c13-sm)"/><text x="330" y="205" text-anchor="middle" class="a">3. fetch from shard</text>
+      </svg>
+      <div class="diagram-caption">Web servers first ask the shard map manager where a prefix lives, then fetch data from that shard. Ranges are chosen from historical data so each shard gets a similar amount.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step4-wrap-up">Step 4: Wrap up</h2>
+    <p>After the deep dive, the interviewer might ask follow-up questions. The book covers these:</p>
+    <h3>How do you extend the design to support multiple languages?</h3>
+    <p>To support other non-English queries, we store <strong>Unicode characters in trie nodes</strong>. Unicode is "an encoding standard that covers all the characters for all the writing systems of the world, modern and ancient".</p>
+    <h3>What if top search queries in one country are different from others?</h3>
+    <p>We might build <strong>different tries for different countries</strong>. To improve response time, we can store tries in <strong>CDNs</strong>.</p>
+    <h3>How can we support trending (real-time) search queries?</h3>
+    <p>Assume a news event breaks out and a search query suddenly becomes popular. Our original design will not work because:</p>
+    <ul>
+      <li>Offline workers are not scheduled to update the trie yet, because they run weekly.</li>
+      <li>Even if scheduled, it takes too long to build the trie.</li>
+    </ul>
+    <p>Building a real-time search autocomplete is complicated and beyond the scope of the book, but a few ideas:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Reduce the working data set</h4><p>Reduce the working data set by sharding.</p></div>
+      <div class="card yellow"><h4>Change the ranking model</h4><p>Assign more weight to recent search queries.</p></div>
+      <div class="card purple"><h4>Stream processing</h4><p>Data may come as streams, so we don't have access to all the data at one time. Streaming data means data is generated continuously. Stream processing requires a different set of systems: Apache Hadoop MapReduce, Apache Spark Streaming, Apache Storm, Apache Kafka, etc.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <div class="diagram"><div class="diagram-title">Final autocomplete architecture</div>
+      <div class="arch">
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Query path (online, per keystroke)</span>
+            <div class="node accent">User<small>browser cache</small></div>
+            <div class="node sky">Load balancer</div>
+            <div class="node sky">API servers</div>
+            <div class="node red">Filter layer</div>
+            <div class="node db green">Trie cache<small>sharded via shard map</small></div>
+          </div>
+        </div>
+        <div class="arch-down">↑<small>weekly snapshot / cache miss</small></div>
+        <div class="arch-row"><div class="node db purple">Trie DB<small>document store or KV store</small></div></div>
+        <div class="arch-down">↑<small>build trie weekly</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Data gathering path (offline, batch)</span>
+            <div class="node">Analytics logs<small>sampled</small></div>
+            <div class="node yellow">Aggregators</div>
+            <div class="node">Aggregated data</div>
+            <div class="node purple">Workers</div>
+          </div>
+        </div>
+      </div>
+      <div class="diagram-caption">Two separate paths. The bottom (offline) path turns sampled logs into a weekly trie. The top (online) path answers each keystroke from memory in O(1).</div>
+    </div>
+    <h3>Walkthrough: a user types "tr"</h3>
+    <ol class="steps">
+      <li><strong>Keystroke "t".</strong> The browser sends an AJAX request <code>search?q=t</code> without reloading the page. If it already asked for "t" within the past hour, the browser cache answers instantly.</li>
+      <li><strong>Load balancer → API server.</strong> The request lands on any API server (they are stateless).</li>
+      <li><strong>Find the shard.</strong> The API server asks the shard map manager which trie cache shard owns the prefix "t".</li>
+      <li><strong>Read the trie node.</strong> Prefix length is capped, so finding the node is O(1). The node already holds its pre-sorted top 5, so returning them is O(1).</li>
+      <li><strong>Filter.</strong> The filter layer drops any suggestion on the block list.</li>
+      <li><strong>Respond.</strong> The client shows e.g. [true, try, toy, tree]. The user types "r" and the same thing happens for "tr", well within 100 ms.</li>
+      <li><strong>Logging.</strong> One in N of these requests is written to the analytics logs.</li>
+      <li><strong>Weekly rebuild.</strong> Aggregators roll the logs into weekly (query, week, frequency) rows; workers build a fresh trie, save it to the trie DB, and the trie cache loads the new snapshot, replacing the old trie.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="interview-guide">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Understand the problem and establish scope</div><div class="iv-time">3–10 min</div></div>
+      <ul><li>Ask: prefix-only matching? How many suggestions? Ranking? Spell check? Languages? Character set? Scale?</li><li>State non-functional requirements: under 100 ms, relevant, sorted, scalable, highly available.</li><li>Do the estimate: ~24,000 QPS, ~48,000 peak, 0.4 GB/day new data.</li></ul>
+      <div class="say">"Let me confirm scope: we match only the beginning of the query, return the top 5 by historical frequency, no spell check, English lowercase letters only, and 10 million DAU. Since each keystroke sends a request, that's about 10 million times 10 searches times 20 characters over 86,400 seconds, roughly 24,000 QPS, 48,000 at peak."</div>
+      <div class="say them">"Why 20 requests per query?"</div>
+      <div class="say">"I'm assuming 4 words of 5 characters, so 20 characters, and the client sends one request per character typed: d, di, din and so on."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">Propose high-level design</div><div class="iv-time">10–15 min</div></div>
+      <ul><li>Two services: data gathering and query service.</li><li>Start with a frequency table and a LIKE ... ORDER BY ... LIMIT 5 query.</li><li>Point out it bottlenecks at scale.</li></ul>
+      <div class="say">"I'll split this into a data gathering service that counts how often each query is searched, and a query service that returns the top 5 for a prefix. The simplest version is a frequency table and a SQL query with LIKE 'prefix%' ordered by frequency, limit 5. That's fine for small data, but at 24,000 QPS on a huge table, the database becomes the bottleneck. So let me go deeper."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Design deep dive</div><div class="iv-time">10–25 min</div></div>
+      <ul><li>Trie, frequency in nodes, naive top-k algorithm and its complexity.</li><li>Two optimizations: cap prefix length, cache top k at each node: O(1).</li><li>Offline data pipeline, trie DB options, query service with cache, browser caching, sampling.</li><li>Trie create/update/delete with filter layer; sharding with a shard map manager.</li></ul>
+      <div class="say">"I'll use a trie. The naive lookup is O(p) to find the prefix, O(c) to walk the subtree and O(c log c) to sort, which can mean traversing most of the trie. Two fixes: cap the prefix at around 50 characters so finding it is constant, and cache the top 5 at each node. That costs space, but makes lookups O(1), and speed is the requirement that matters most."</div>
+      <div class="say them">"Do you update the trie on every search?"</div>
+      <div class="say">"No. With billions of queries per day that would slow the query service down, and top suggestions don't change much. I'd log queries, aggregate them weekly, have workers rebuild the trie, store it in a trie DB and load a weekly snapshot into the trie cache. If the interviewer needs real-time freshness, I'd shorten the aggregation window."</div>
+      <div class="say them">"How do you remove an offensive suggestion right now?"</div>
+      <div class="say">"A filter layer between the API servers and trie cache drops it immediately. Then it is physically deleted from the database asynchronously, so the next rebuild doesn't include it."</div>
+      <div class="say them">"The trie doesn't fit on one machine. How do you shard?"</div>
+      <div class="say">"By first character is the naive approach, up to 26 shards, and deeper levels beyond that. But it's uneven, far more words start with 'c' than 'x'. So I'd use a shard map manager built from historical distribution, for example one shard for 's' and one shard for 'u' through 'z' if their volumes are similar."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Multiple languages, country-specific tries, trending queries.</li></ul>
+      <div class="say them">"How would you support trending searches during breaking news?"</div>
+      <div class="say">"The weekly batch can't react in time. I'd reduce the working data set with sharding, change the ranking model to weight recent queries more, and move to stream processing with tools like Kafka, Spark Streaming or Storm."</div>
+      <div class="say them">"And other languages or countries?"</div>
+      <div class="say">"Store Unicode characters in trie nodes for other languages. For country-specific popularity, build separate tries per country and serve them from CDNs for lower latency."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Running a SQL LIKE query per keystroke at scale</div><p>Fine for a prototype, but at ~24,000 QPS against a huge table it won't meet 100 ms. Move to a trie in memory.</p></div>
+    <div class="callout danger"><div class="callout-title">Updating the trie in real time on every search</div><p>Billions of writes per day slow down reads, and every update must also update all ancestors' cached top-k lists. Build offline and swap weekly unless real-time is a stated requirement.</p></div>
+    <div class="callout warn"><div class="callout-title">Forgetting that each keystroke is a request</div><p>The QPS estimate must multiply by characters per query (about 20), not just searches per day.</p></div>
+    <div class="callout warn"><div class="callout-title">Stopping at the naive trie</div><p>Without capping prefix length and caching top k at each node, the lookup can traverse most of the trie. State the O(1) optimizations and the space-for-time trade-off.</p></div>
+    <div class="callout warn"><div class="callout-title">Sharding evenly by letter and calling it done</div><p>Letter-based shards are badly imbalanced. Mention historical distribution and a shard map manager.</p></div>
+    <div class="callout warn"><div class="callout-title">No plan for removing harmful suggestions</div><p>Always include a filter layer and asynchronous physical deletion.</p></div>
+    <div class="callout warn"><div class="callout-title">Ignoring client-side wins</div><p>AJAX, browser caching (cache-control: private, max-age=3600) and data sampling are cheap, high-impact optimizations.</p></div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. Walk through the QPS estimate. Where does 24,000 come from?</summary><div><p>10,000,000 DAU × 10 searches/day × 20 requests per search (one per character, 4 words × 5 chars) / 86,400 seconds ≈ 23,000, rounded to about 24,000 QPS. Peak is about double: 48,000.</p></div></details>
+      <details><summary>2. How much new data per day, and how?</summary><div><p>10M × 10 queries × 20 bytes × 20% new = 0.4 GB per day. Storage is modest, so speed, not storage, is the main challenge.</p></div></details>
+      <details><summary>3. What does a node in a trie represent, and what does the root represent?</summary><div><p>Each node represents a prefix (or complete word): the characters on the path from the root to it. The root represents the empty string. With lowercase English, each node has up to 26 children.</p></div></details>
+      <details><summary>4. Using the frequencies tree:10, try:29, true:35, toy:14, wish:25, win:50, what are the top 2 for prefix "t"? For "w"?</summary><div><p>"t": true:35, try:29 (toy:14 and tree:10 are lower). "w": win:50, wish:25.</p></div></details>
+      <details><summary>5. What is the complexity of the naive top-k algorithm, and why is it too slow?</summary><div><p>O(p) + O(c) + O(c log c): find the prefix, traverse all descendants, sort them. For a short prefix like "a", c can be huge, so in the worst case you traverse almost the entire trie per keystroke.</p></div></details>
+      <details><summary>6. Which two optimizations make lookups O(1), and what do they cost?</summary><div><p>Limit the max prefix length (e.g. 50) so finding the node is constant time, and cache the top k queries at every node so no traversal or sorting is needed. The cost is extra memory, since every node stores a list; the book argues trading space for time is worth it.</p></div></details>
+      <details><summary>7. Scenario: the frequency of "tree" jumps from 10 to 60 and you update the node in place. Which nodes must change?</summary><div><p>The "tree" node and all its ancestors: "tre", "tr", "t" and the root, because each caches the top queries of its subtree. With k = 2, root becomes [tree:60, win:50], "t" and "tr" become [tree:60, true:35]. This ripple is why per-node updates are slow and weekly rebuilds are preferred.</p></div></details>
+      <details><summary>8. What are the two options for the trie DB?</summary><div><p>A document store (e.g. MongoDB) holding a serialized snapshot of the weekly trie, or a key-value store where each prefix is a key and the node's data (its top queries) is the value.</p></div></details>
+      <details><summary>9. Scenario: a hateful query starts appearing in suggestions. What do you do right now, and what happens later?</summary><div><p>Add a rule to the filter layer between the API servers and the trie cache, so it is hidden immediately. The entry is then physically removed from the database asynchronously, so the next trie rebuild uses a clean data set.</p></div></details>
+      <details><summary>10. Why is sharding by first letter problematic and how do you fix it?</summary><div><p>Data is uneven: far more words start with 'c' than 'x', so some shards get overloaded. Use historical data distribution and a shard map manager, e.g. one shard for 's' and another for 'u' through 'z' if their query volumes are similar.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Scope: prefix-only matching, top 5 by historical frequency, no spell check, English lowercase, 10M DAU, under 100 ms.</li>
+      <li>Estimate: 10M × 10 × 20 / 86,400 ≈ 24,000 QPS, peak ~48,000; 0.4 GB new data/day (20% new).</li>
+      <li>Two services: data gathering (build the data) and query service (answer prefixes).</li>
+      <li>v1: frequency table + <code>LIKE 'prefix%' ORDER BY frequency DESC LIMIT 5</code>; works small, bottlenecks at scale.</li>
+      <li>Trie: root = empty string, each node = prefix, up to 26 children, frequency stored in nodes.</li>
+      <li>Naive top-k: O(p) + O(c) + O(c log c). Optimized: cap prefix (~50) + cache top k per node = O(1). Space traded for time.</li>
+      <li>Offline pipeline: analytics logs → aggregators → aggregated data (weekly) → workers → trie DB → trie cache (weekly snapshot).</li>
+      <li>Trie DB: document store (serialized snapshot, MongoDB) or KV store (prefix → node data).</li>
+      <li>Query path: LB → API servers → trie cache → trie DB on miss. Plus AJAX, browser cache (private, max-age=3600), data sampling (1 in N).</li>
+      <li>Update: replace whole trie weekly; per-node updates must also update all ancestors. Delete: filter layer now, physical removal async.</li>
+      <li>Scale: shard by first letter (26), then deeper levels; fix uneven load with a shard map manager based on history.</li>
+      <li>Extras: Unicode for languages, per-country tries in CDNs, trending via sharding, recency-weighted ranking and stream processing (Kafka, Spark Streaming, Storm, MapReduce).</li>
+    </ul></div>
+  </section>
+
+</main>
+<script src="assets/app.js"></script></body></html>

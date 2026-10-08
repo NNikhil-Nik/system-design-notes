@@ -1,0 +1,1885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>System Design – Alex Xu | Ch 4–9 Deep Notes</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d2e;
+      --surface2: #252840;
+      --border: #2e3250;
+      --text: #e8eaf6;
+      --muted: #8b90b8;
+      --accent: #7c83f5;
+      --accent2: #56cfb2;
+      --warn: #f5a623;
+      --danger: #f56565;
+      --ch4: #7c83f5;
+      --ch5: #56cfb2;
+      --ch6: #f5a623;
+      --ch7: #f472b6;
+      --ch8: #60a5fa;
+      --ch9: #a78bfa;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.75;
+    }
+
+    /* NAV */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(15,17,23,0.95);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 0;
+      height: 56px;
+      overflow-x: auto;
+    }
+    nav .logo {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: .05em;
+      white-space: nowrap;
+      margin-right: 24px;
+      text-transform: uppercase;
+    }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 12.5px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+      transition: all .15s;
+    }
+    nav a:hover { color: var(--text); background: var(--surface2); }
+
+    /* HERO */
+    .hero {
+      text-align: center;
+      padding: 64px 24px 48px;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+    .hero .tag {
+      display: inline-block;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 20px;
+      margin-bottom: 18px;
+    }
+    .hero h1 {
+      font-size: clamp(26px, 5vw, 40px);
+      font-weight: 800;
+      line-height: 1.2;
+      margin-bottom: 14px;
+    }
+    .hero h1 span { color: var(--accent); }
+    .hero p { color: var(--muted); font-size: 15px; max-width: 540px; margin: 0 auto; }
+
+    /* TOC */
+    .toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      max-width: 900px;
+      margin: 0 auto 56px;
+      padding: 0 24px;
+      justify-content: center;
+    }
+    .toc a {
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      border: 1px solid;
+      transition: all .15s;
+    }
+    .toc a:hover { transform: translateY(-2px); filter: brightness(1.2); }
+
+    /* MAIN */
+    main { max-width: 920px; margin: 0 auto; padding: 0 24px 100px; }
+
+    /* CHAPTER CARD */
+    .chapter {
+      margin-bottom: 56px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity .4s ease, transform .4s ease;
+    }
+    .chapter.visible { opacity: 1; transform: translateY(0); }
+    .chapter-header {
+      padding: 24px 28px 20px;
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .ch-badge {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: 800;
+      flex-shrink: 0;
+    }
+    .ch-meta { flex: 1; }
+    .ch-meta h2 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    .ch-meta .subtitle { font-size: 13px; color: var(--muted); }
+    .chapter-body { padding: 28px; background: var(--surface); }
+
+    /* SECTIONS */
+    .section { margin-bottom: 28px; }
+    .section:last-child { margin-bottom: 0; }
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+    /* BULLET LIST */
+    ul.notes { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+    ul.notes li {
+      font-size: 14px;
+      color: var(--text);
+      padding-left: 20px;
+      position: relative;
+      line-height: 1.65;
+    }
+    ul.notes li::before {
+      content: '▸';
+      position: absolute;
+      left: 0;
+      top: 2px;
+      font-size: 10px;
+      color: var(--accent);
+    }
+    ul.notes li strong { font-weight: 600; }
+    ul.notes li .dim { color: var(--muted); font-size: 13px; }
+    ul.notes.sub-list { margin-top: 6px; padding-left: 16px; }
+    ul.notes.sub-list li::before { color: var(--muted); }
+
+    /* ANALOGY BOX */
+    .analogy {
+      background: linear-gradient(135deg, rgba(124,131,245,0.08), rgba(86,207,178,0.08));
+      border: 1px solid rgba(124,131,245,0.3);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 10px 10px 0;
+      padding: 14px 18px;
+      font-size: 13.5px;
+      line-height: 1.7;
+      margin-bottom: 4px;
+    }
+    .analogy .analogy-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
+
+    /* HIGHLIGHT BOX */
+    .highlight {
+      background: var(--surface2);
+      border-left: 3px solid;
+      border-radius: 0 8px 8px 0;
+      padding: 12px 16px;
+      font-size: 13.5px;
+      line-height: 1.7;
+    }
+    .highlight strong { font-weight: 700; }
+
+    /* WARNING BOX */
+    .warn-box {
+      background: rgba(245,166,35,0.08);
+      border: 1px solid rgba(245,166,35,0.3);
+      border-left: 3px solid var(--warn);
+      border-radius: 0 8px 8px 0;
+      padding: 12px 16px;
+      font-size: 13.5px;
+      line-height: 1.7;
+    }
+    .warn-box .warn-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--warn);
+      margin-bottom: 6px;
+    }
+
+    /* ALGO GRID */
+    .algo-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .algo-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .algo-card h4 { font-size: 13.5px; font-weight: 700; margin-bottom: 8px; }
+    .algo-card ul { list-style: none; display: flex; flex-direction: column; gap: 5px; }
+    .algo-card ul li {
+      font-size: 12.5px;
+      color: var(--muted);
+      padding-left: 14px;
+      position: relative;
+      line-height: 1.5;
+    }
+    .algo-card ul li::before { content: '·'; position: absolute; left: 4px; }
+    .algo-card ul li.good { color: #56cfb2; }
+    .algo-card ul li.bad { color: #f56565; }
+
+    /* FLOW */
+    .flow {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .flow-node {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .flow-arrow { color: var(--muted); padding: 0 6px; font-size: 14px; }
+
+    /* TABLE */
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .cmp-table th {
+      text-align: left;
+      padding: 9px 12px;
+      background: var(--surface2);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      border-bottom: 1px solid var(--border);
+    }
+    .cmp-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text); line-height: 1.5; }
+    .cmp-table tr:last-child td { border-bottom: none; }
+    .cmp-table tr:hover td { background: var(--surface2); }
+
+    /* KV GRID */
+    .kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+    .kv-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .kv-item .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; margin-bottom: 4px; }
+    .kv-item .v { font-size: 13px; font-weight: 600; }
+
+    /* CODE INLINE */
+    code {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11.5px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--accent2);
+    }
+
+    /* BADGE */
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-left: 4px;
+    }
+
+    /* INTERVIEW SECTION */
+    .interview-section {
+      background: linear-gradient(135deg, rgba(124,131,245,0.06), rgba(15,17,23,0));
+      border: 1px solid rgba(124,131,245,0.2);
+      border-radius: 12px;
+      padding: 20px 24px;
+    }
+    .interview-section .int-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .interview-section .int-title::before { content: '?'; background: var(--accent); color: #000; width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; }
+    .int-q { display: flex; flex-direction: column; gap: 10px; }
+    .int-q-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    .int-q-item:hover { border-color: var(--accent); }
+    .int-q-item .q-text {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text);
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .int-q-item .q-text::before { content: 'Q'; color: var(--accent); font-size: 11px; font-weight: 800; background: rgba(124,131,245,0.15); padding: 1px 6px; border-radius: 4px; flex-shrink: 0; margin-top: 1px; }
+    .int-q-item .a-text {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 8px;
+      padding-left: 30px;
+      line-height: 1.65;
+      display: none;
+    }
+    .int-q-item.open .a-text { display: block; }
+    .int-q-item.open { border-color: rgba(124,131,245,0.5); }
+    .int-q-item .toggle-hint {
+      font-size: 11px;
+      color: var(--muted);
+      padding-left: 30px;
+      margin-top: 4px;
+    }
+    .int-q-item.open .toggle-hint { display: none; }
+
+    /* SNOWFLAKE VIZ */
+    .snowflake-viz {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      overflow-x: auto;
+    }
+
+    /* DIAGRAM CONTAINER */
+    .diagram-box {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      overflow-x: auto;
+      margin: 12px 0;
+    }
+    .diagram-box svg { display: block; margin: 0 auto; }
+    .diagram-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+      text-align: center;
+    }
+    .side-by-side {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .side-by-side > div { flex: 1; min-width: 280px; }
+
+    /* RESPONSIVE */
+    @media (max-width: 600px) {
+      .chapter-header { flex-direction: column; gap: 10px; }
+      .algo-grid { grid-template-columns: 1fr; }
+      .kv-grid { grid-template-columns: 1fr 1fr; }
+      .side-by-side { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <span class="logo">SysDesign · Alex Xu</span>
+  <a href="#ch4">Ch4 Rate Limiter</a>
+  <a href="#ch5">Ch5 Consistent Hashing</a>
+  <a href="#ch6">Ch6 Key-Value Store</a>
+  <a href="#ch7">Ch7 Unique ID</a>
+  <a href="#ch8">Ch8 URL Shortener</a>
+  <a href="#ch9">Ch9 Web Crawler</a>
+</nav>
+
+<div class="hero">
+  <div class="tag">System Design Interview · Alex Xu · Part 1</div>
+  <h1>Chapters <span>4 – 9</span> Deep Notes</h1>
+  <p>Plain-English explanations, real-world analogies, and interview Q&amp;A — everything you need to actually understand these systems, not just memorize them.</p>
+</div>
+
+<div class="toc">
+  <a href="#ch4" style="color:var(--ch4);border-color:var(--ch4);background:color-mix(in srgb,var(--ch4) 10%,transparent)">04 · Rate Limiter</a>
+  <a href="#ch5" style="color:var(--ch5);border-color:var(--ch5);background:color-mix(in srgb,var(--ch5) 10%,transparent)">05 · Consistent Hashing</a>
+  <a href="#ch6" style="color:var(--ch6);border-color:var(--ch6);background:color-mix(in srgb,var(--ch6) 10%,transparent)">06 · Key-Value Store</a>
+  <a href="#ch7" style="color:var(--ch7);border-color:var(--ch7);background:color-mix(in srgb,var(--ch7) 10%,transparent)">07 · Unique ID Generator</a>
+  <a href="#ch8" style="color:var(--ch8);border-color:var(--ch8);background:color-mix(in srgb,var(--ch8) 10%,transparent)">08 · URL Shortener</a>
+  <a href="#ch9" style="color:var(--ch9);border-color:var(--ch9);background:color-mix(in srgb,var(--ch9) 10%,transparent)">09 · Web Crawler</a>
+</div>
+
+<main>
+
+<!-- ══════════════════════════════════════════════ CHAPTER 4 ══════ -->
+<div class="chapter" id="ch4">
+  <div class="chapter-header">
+    <div class="ch-badge" style="background:color-mix(in srgb,var(--ch4) 15%,transparent);color:var(--ch4)">04</div>
+    <div class="ch-meta">
+      <h2 style="color:var(--ch4)">Design a Rate Limiter</h2>
+      <div class="subtitle">Throttle API calls · Prevent abuse · Control traffic flow</div>
+    </div>
+  </div>
+  <div class="chapter-body">
+
+    <div class="section">
+      <div class="section-title">What is a Rate Limiter?</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — The Nightclub Bouncer</div>
+        Imagine a nightclub that allows max 100 people per hour. The bouncer counts entries and turns people away once the limit is hit. The rate limiter is that bouncer — it lets a certain number of requests through and rejects the rest with a "429 Too Many Requests" response.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Goal:</strong> Limit how many API requests a user/IP/service can make in a given time window</li>
+        <li><strong>Prevent DoS/DDoS:</strong> Without rate limiting, a single bad actor can flood your servers with millions of requests per second, crashing them for everyone else</li>
+        <li><strong>Reduce costs:</strong> Cloud services charge per request — uncontrolled usage = huge bills</li>
+        <li><strong>Enforce fair use:</strong> Free tier = 100 req/day, paid tier = unlimited. Rate limiter enforces these tiers</li>
+        <li><strong>Stop bots:</strong> Brute-force login attacks try thousands of passwords per second — rate limit stops them cold</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="diagram-box">
+        <div class="diagram-label">Token Bucket — How It Works</div>
+        <svg viewBox="0 0 700 260" width="100%" style="max-width:700px">
+          <!-- Bucket -->
+          <path d="M200,60 L160,240 L440,240 L400,60 Z" fill="none" stroke="#7c83f5" stroke-width="2.5" rx="8"/>
+          <text x="300" y="45" text-anchor="middle" fill="#8b90b8" font-size="12" font-family="sans-serif">Bucket (max 5 tokens)</text>
+          <!-- Tokens inside -->
+          <circle cx="240" cy="210" r="16" fill="#7c83f5" opacity="0.8"/><text x="240" y="215" text-anchor="middle" fill="#000" font-size="11" font-weight="700" font-family="monospace">T</text>
+          <circle cx="300" cy="210" r="16" fill="#7c83f5" opacity="0.8"/><text x="300" y="215" text-anchor="middle" fill="#000" font-size="11" font-weight="700" font-family="monospace">T</text>
+          <circle cx="360" cy="210" r="16" fill="#7c83f5" opacity="0.8"/><text x="360" y="215" text-anchor="middle" fill="#000" font-size="11" font-weight="700" font-family="monospace">T</text>
+          <circle cx="270" cy="170" r="16" fill="#7c83f5" opacity="0.5"/><text x="270" y="175" text-anchor="middle" fill="#000" font-size="11" font-weight="700" font-family="monospace">T</text>
+          <!-- Refill arrow -->
+          <line x1="300" y1="0" x2="300" y2="55" stroke="#56cfb2" stroke-width="2" stroke-dasharray="6,4"/>
+          <polygon points="292,50 300,62 308,50" fill="#56cfb2"/>
+          <text x="300" y="-5" text-anchor="middle" fill="#56cfb2" font-size="11" font-family="sans-serif" font-weight="600">Refill: 2 tokens/sec</text>
+          <!-- Request 1: allowed -->
+          <line x1="480" y1="100" x2="445" y2="100" stroke="#56cfb2" stroke-width="2"/>
+          <polygon points="448,94 436,100 448,106" fill="#56cfb2"/>
+          <text x="490" y="95" fill="#e8eaf6" font-size="11" font-family="sans-serif" font-weight="600">Request 1</text>
+          <text x="490" y="112" fill="#56cfb2" font-size="11" font-family="sans-serif">✓ Token consumed</text>
+          <text x="490" y="127" fill="#56cfb2" font-size="11" font-family="sans-serif">→ 200 OK</text>
+          <!-- Request 2: rejected -->
+          <line x1="480" y1="185" x2="445" y2="185" stroke="#f56565" stroke-width="2"/>
+          <line x1="442" y1="178" x2="430" y2="192" stroke="#f56565" stroke-width="3"/>
+          <line x1="430" y1="178" x2="442" y2="192" stroke="#f56565" stroke-width="3"/>
+          <text x="490" y="180" fill="#e8eaf6" font-size="11" font-family="sans-serif" font-weight="600">Request N</text>
+          <text x="490" y="197" fill="#f56565" font-size="11" font-family="sans-serif">✗ Bucket empty!</text>
+          <text x="490" y="212" fill="#f56565" font-size="11" font-family="sans-serif">→ 429 Too Many Requests</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Where to Put the Rate Limiter?</div>
+      <ul class="notes">
+        <li><strong>Client-side:</strong> Useless. Attackers simply ignore it. Never rely on client-side limits for security</li>
+        <li><strong>Server-side middleware:</strong> Before the request hits your business logic. Clean separation of concerns — your app code doesn't need to know about rate limiting</li>
+        <li><strong>API Gateway:</strong> A managed layer that already handles SSL termination, auth, routing. Adding rate limiting here is efficient — one config rules them all (used by AWS API Gateway, Kong, Nginx)</li>
+        <li><strong>Rule of thumb:</strong> Already have an API Gateway? Add limits there. Building from scratch? Use server-side middleware. Microservices? Put it at the gateway so each service doesn't re-implement it</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Rate Limiter Placement — Architecture</div>
+        <svg viewBox="0 0 720 200" width="100%" style="max-width:720px">
+          <!-- Client -->
+          <rect x="20" y="70" width="100" height="55" rx="10" fill="#252840" stroke="#7c83f5" stroke-width="2"/>
+          <text x="70" y="102" text-anchor="middle" fill="#e8eaf6" font-size="12" font-weight="600" font-family="sans-serif">Client</text>
+          <!-- Arrow -->
+          <line x1="125" y1="97" x2="185" y2="97" stroke="#8b90b8" stroke-width="1.5" marker-end="url(#arrowM)"/>
+          <!-- API Gateway -->
+          <rect x="190" y="40" width="180" height="115" rx="12" fill="none" stroke="#7c83f5" stroke-width="2" stroke-dasharray="6,3"/>
+          <text x="280" y="62" text-anchor="middle" fill="#7c83f5" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1">API GATEWAY</text>
+          <rect x="210" y="72" width="140" height="34" rx="6" fill="rgba(124,131,245,0.15)" stroke="#7c83f5" stroke-width="1.5"/>
+          <text x="280" y="94" text-anchor="middle" fill="#7c83f5" font-size="11" font-weight="700" font-family="sans-serif">Rate Limiter</text>
+          <rect x="210" y="116" width="140" height="28" rx="6" fill="#252840" stroke="#2e3250" stroke-width="1"/>
+          <text x="280" y="135" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">Auth · SSL · Routing</text>
+          <!-- Arrow to servers -->
+          <line x1="375" y1="97" x2="430" y2="97" stroke="#8b90b8" stroke-width="1.5" marker-end="url(#arrowM)"/>
+          <!-- Web Servers -->
+          <rect x="435" y="55" width="120" height="85" rx="10" fill="#252840" stroke="#56cfb2" stroke-width="2"/>
+          <text x="495" y="88" text-anchor="middle" fill="#56cfb2" font-size="11" font-weight="600" font-family="sans-serif">Web Servers</text>
+          <text x="495" y="106" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">(Business Logic)</text>
+          <!-- Redis below gateway -->
+          <rect x="590" y="70" width="110" height="50" rx="8" fill="#252840" stroke="#f56565" stroke-width="2"/>
+          <text x="645" y="92" text-anchor="middle" fill="#f56565" font-size="11" font-weight="600" font-family="sans-serif">Redis</text>
+          <text x="645" y="107" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">Counter Store</text>
+          <!-- Redis arrow from rate limiter -->
+          <line x1="350" y1="89" x2="350" y2="20" stroke="#f56565" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <line x1="350" y1="20" x2="635" y2="20" stroke="#f56565" stroke-width="1.5" stroke-dasharray="5,3"/>
+          <line x1="635" y1="20" x2="635" y2="65" stroke="#f56565" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowR)"/>
+          <text x="490" y="14" text-anchor="middle" fill="#f56565" font-size="9" font-family="sans-serif">Check / Increment counter</text>
+          <!-- Arrowhead defs -->
+          <defs>
+            <marker id="arrowM" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#8b90b8"/></marker>
+            <marker id="arrowR" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0,0 8,3 0,6" fill="#f56565"/></marker>
+          </defs>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">5 Core Algorithms — Explained Simply</div>
+      <div class="algo-grid">
+        <div class="algo-card" style="border-top:3px solid var(--ch4)">
+          <h4 style="color:var(--ch4)">1. Token Bucket</h4>
+          <ul>
+            <li>Imagine a bucket that holds N tokens. Tokens drip in at a fixed rate (e.g. 10/sec). Each request "spends" 1 token. If empty → reject</li>
+            <li>Burst-friendly: can send 50 requests instantly if bucket has 50 tokens</li>
+            <li class="good">✓ Allows bursts up to bucket size</li>
+            <li class="good">✓ Simple & memory efficient</li>
+            <li>Used by: AWS, Stripe</li>
+          </ul>
+        </div>
+        <div class="algo-card" style="border-top:3px solid var(--ch5)">
+          <h4 style="color:var(--ch5)">2. Leaking Bucket</h4>
+          <ul>
+            <li>Requests enter a fixed-size FIFO queue. They "leak out" (get processed) at a constant rate. If queue is full → new requests dropped</li>
+            <li>Like a bucket with a small hole — water (requests) drips out steadily regardless of how fast water pours in</li>
+            <li class="good">✓ Smooth, predictable output rate</li>
+            <li class="bad">✗ Burst of old requests on restart</li>
+          </ul>
+        </div>
+        <div class="algo-card" style="border-top:3px solid var(--ch6)">
+          <h4 style="color:var(--ch6)">3. Fixed Window Counter</h4>
+          <ul>
+            <li>Divide time into fixed windows (e.g. every minute). Count requests per window. Reset counter at window boundary</li>
+            <li>Simple: just increment a Redis counter with TTL</li>
+            <li class="good">✓ Simple, very memory efficient</li>
+            <li class="bad">✗ Boundary spike: 100 at 00:59 + 100 at 01:01 = 200 in 2 seconds</li>
+          </ul>
+        </div>
+        <div class="algo-card" style="border-top:3px solid var(--ch7)">
+          <h4 style="color:var(--ch7)">4. Sliding Window Log</h4>
+          <ul>
+            <li>Store the exact timestamp of every request. To check limit, count timestamps within the last N seconds. Evict old ones</li>
+            <li>Most accurate — no boundary spike problem</li>
+            <li class="good">✓ Very accurate, no edge-case spikes</li>
+            <li class="bad">✗ High memory: stores every timestamp even for rejected requests</li>
+          </ul>
+        </div>
+        <div class="algo-card" style="border-top:3px solid var(--ch8)">
+          <h4 style="color:var(--ch8)">5. Sliding Window Counter ✓</h4>
+          <ul>
+            <li>Hybrid: current window count + (previous window count × overlap ratio). E.g. if you're 30% into the current minute, use 70% of last minute's count</li>
+            <li>Formula: <code>prev_count × (1 - overlap%) + cur_count</code></li>
+            <li class="good">✓ Accurate and memory efficient</li>
+            <li class="good">✓ Most widely used in practice</li>
+          </ul>
+        </div>
+      </div>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Fixed Window — Boundary Spike Problem</div>
+        <svg viewBox="0 0 680 190" width="100%" style="max-width:680px">
+          <!-- Timeline -->
+          <line x1="40" y1="130" x2="640" y2="130" stroke="#8b90b8" stroke-width="1.5"/>
+          <!-- Window 1 -->
+          <rect x="60" y="30" width="250" height="95" rx="6" fill="rgba(245,166,35,0.06)" stroke="#f5a623" stroke-width="1" stroke-dasharray="5,3"/>
+          <text x="185" y="22" text-anchor="middle" fill="#f5a623" font-size="11" font-weight="700" font-family="sans-serif">Window 1 (00:00 – 01:00)</text>
+          <!-- Window 2 -->
+          <rect x="320" y="30" width="250" height="95" rx="6" fill="rgba(96,165,250,0.06)" stroke="#60a5fa" stroke-width="1" stroke-dasharray="5,3"/>
+          <text x="445" y="22" text-anchor="middle" fill="#60a5fa" font-size="11" font-weight="700" font-family="sans-serif">Window 2 (01:00 – 02:00)</text>
+          <!-- Spike in window 1 (right edge) -->
+          <rect x="260" y="45" width="45" height="70" rx="4" fill="rgba(245,166,35,0.3)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="282" y="75" text-anchor="middle" fill="#f5a623" font-size="18" font-weight="800" font-family="sans-serif">100</text>
+          <text x="282" y="92" text-anchor="middle" fill="#f5a623" font-size="9" font-family="sans-serif">requests</text>
+          <text x="282" y="107" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">at 00:59</text>
+          <!-- Spike in window 2 (left edge) -->
+          <rect x="325" y="45" width="45" height="70" rx="4" fill="rgba(96,165,250,0.3)" stroke="#60a5fa" stroke-width="1.5"/>
+          <text x="347" y="75" text-anchor="middle" fill="#60a5fa" font-size="18" font-weight="800" font-family="sans-serif">100</text>
+          <text x="347" y="92" text-anchor="middle" fill="#60a5fa" font-size="9" font-family="sans-serif">requests</text>
+          <text x="347" y="107" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">at 01:01</text>
+          <!-- Boundary marker -->
+          <line x1="315" y1="28" x2="315" y2="140" stroke="#f56565" stroke-width="2" stroke-dasharray="4,3"/>
+          <text x="315" y="155" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="sans-serif">BOUNDARY</text>
+          <!-- Problem callout -->
+          <rect x="430" y="50" width="180" height="55" rx="6" fill="rgba(245,101,101,0.1)" stroke="#f56565" stroke-width="1.5"/>
+          <text x="520" y="70" text-anchor="middle" fill="#f56565" font-size="12" font-weight="700" font-family="sans-serif">200 requests</text>
+          <text x="520" y="86" text-anchor="middle" fill="#f56565" font-size="11" font-family="sans-serif">in just 2 seconds!</text>
+          <text x="520" y="100" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">Limit is 100/min but both windows say OK</text>
+          <!-- Time labels -->
+          <text x="60" y="148" fill="#8b90b8" font-size="10" font-family="sans-serif">00:00</text>
+          <text x="315" y="175" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">01:00</text>
+          <text x="570" y="148" fill="#8b90b8" font-size="10" font-family="sans-serif" text-anchor="end">02:00</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Distributed Rate Limiting — The Hard Part</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Multiple Ticket Windows</div>
+        Imagine a concert venue with 5 ticket counters, each independently tracking how many tickets they've sold. Counter A sells 100, Counter B sells 100 — now you've oversold by 400! You need a shared counter that all windows update atomically.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Race condition:</strong> Two rate limiter nodes both read counter = 99, both see it's under limit of 100, both increment to 100. You now have 101 requests through. Fix: use <code>Redis INCR</code> (atomic) or a Lua script for read-increment-check atomicity</li>
+        <li><strong>Centralized Redis:</strong> All rate limiter nodes share a single Redis cluster as the source of truth. Trade-off: Redis is now a bottleneck and single point of failure (mitigate with Redis Cluster / Sentinel)</li>
+        <li><strong>Sticky sessions:</strong> Route same user always to same rate limiter node. Works but breaks when a node dies and re-balancing kicks in</li>
+        <li><strong>Local + global:</strong> Each node tracks local count + syncs to Redis every N ms. Slightly inaccurate but highly available and fast</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Response Headers — What to Send Back</div>
+      <div class="kv-grid">
+        <div class="kv-item"><div class="k">HTTP Status</div><div class="v" style="color:var(--danger)">429 Too Many Requests</div></div>
+        <div class="kv-item"><div class="k">X-Ratelimit-Remaining</div><div class="v">Requests left this window</div></div>
+        <div class="kv-item"><div class="k">X-Ratelimit-Limit</div><div class="v">Max requests allowed</div></div>
+        <div class="kv-item"><div class="k">X-Ratelimit-Reset</div><div class="v">Unix timestamp of next reset</div></div>
+        <div class="kv-item"><div class="k">Retry-After</div><div class="v">Seconds until retry is OK</div></div>
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li>Good clients use <code>Retry-After</code> to implement exponential backoff instead of hammering your API</li>
+        <li>Always return headers even for allowed requests — lets clients self-throttle proactively</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="interview-section">
+        <div class="int-title">Interview Questions</div>
+        <div class="int-q">
+          <div class="int-q-item">
+            <div class="q-text">What's the difference between Token Bucket and Leaking Bucket?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Token Bucket allows <strong>bursting</strong> — if tokens have accumulated, you can send many requests instantly. Leaking Bucket enforces a <strong>strict constant output rate</strong> — it smooths out traffic like a queue draining at fixed speed. Use Token Bucket for APIs where bursts are acceptable. Use Leaking Bucket for downstream services that can't handle spikes (e.g. payment processors).</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">Why does Fixed Window Counter have a boundary spike problem?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Suppose limit is 100 req/min. A user sends 100 requests at 00:59 (last second of window 1) and 100 more at 01:01 (first second of window 2). Both windows show 100 — within limit! But in the 2-second span around the boundary, 200 requests got through. Sliding Window Counter fixes this by blending counts from both windows.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How do you handle rate limiting in a distributed system?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Use a <strong>centralized Redis store</strong> that all rate limiter nodes share. Use Redis's atomic <code>INCR</code> command with a TTL to count requests per key (user ID / IP). Use a Lua script for compound operations (check + increment atomically). For high availability, run Redis in cluster mode. The trade-off is Redis becomes a dependency — add connection pooling and circuit breakers.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How would you rate limit by user ID, IP, and API endpoint simultaneously?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Use <strong>composite keys</strong> in Redis: <code>ratelimit:{userId}:{endpoint}</code>, <code>ratelimit:{ip}</code>. Check all relevant keys for each request. A request can be blocked if any key exceeds its limit. Endpoint-level limits prevent one expensive endpoint from consuming all quota. Apply limits hierarchically: IP → user → endpoint (most specific wins).</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">What are the trade-offs between hard vs soft rate limiting?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text"><strong>Hard limit:</strong> Strictly block at threshold. Simple, predictable, but jarring — user at 100 requests sees 429 on request 101 instantly. <strong>Soft limit:</strong> Allow small overages (e.g. 10% burst), throttle with backpressure instead of rejection. Better UX, harder to configure correctly. Most production systems use hard limits with generous thresholds plus burst allowances.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════ CHAPTER 5 ══════ -->
+<div class="chapter" id="ch5">
+  <div class="chapter-header">
+    <div class="ch-badge" style="background:color-mix(in srgb,var(--ch5) 15%,transparent);color:var(--ch5)">05</div>
+    <div class="ch-meta">
+      <h2 style="color:var(--ch5)">Design Consistent Hashing</h2>
+      <div class="subtitle">Minimize key remapping when servers join or leave</div>
+    </div>
+  </div>
+  <div class="chapter-body">
+
+    <div class="section">
+      <div class="section-title">The Problem — Why Normal Hashing Breaks</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Assigning Rows at a Restaurant</div>
+        Imagine 4 waiters (servers). Tables are assigned by <code>table_number % 4</code>. Waiter 0 covers tables 0,4,8,12... everything works. Then waiter #3 quits. Now <code>% 3</code> gives completely different assignments — almost every table gets a new waiter. Chaos. That's what normal modulo hashing does when a server is added/removed.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Normal formula:</strong> <code>serverIndex = hash(key) % N</code> where N = number of servers</li>
+        <li>Add or remove 1 server → N changes → <strong>almost every key maps to a new server</strong></li>
+        <li>In a cache cluster, this means a sudden <strong>cache miss storm</strong> — all traffic hits the database simultaneously, potentially crashing it</li>
+        <li>Real example: you have 4 Redis cache nodes. Node 2 crashes. With naïve hashing, ~75% of all cache keys now route to wrong nodes → 75% cache miss rate → DB gets hammered</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">The Solution — Hash Ring</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Clock with Server Stations</div>
+        Imagine a clock face (0 to 360°). Servers are placed at positions on the clock. A key is also placed at a position (via hashing). The key "belongs to" the first server you encounter going clockwise. If a server is removed, only the keys between it and its predecessor need to move — everyone else stays put.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Hash ring:</strong> A circular number line from 0 to 2³²−1 (about 4 billion positions)</li>
+        <li><strong>Server placement:</strong> Each server's name/IP is hashed to a position on the ring</li>
+        <li><strong>Key assignment:</strong> Hash the key → find position → walk clockwise → first server you hit owns that key</li>
+        <li><strong>Adding a server:</strong> Only keys between the new server and its predecessor move. Formally, only <code>k/n</code> keys move (k = total keys, n = servers)</li>
+        <li><strong>Removing a server:</strong> Its keys move to the next server clockwise. Other servers are completely unaffected</li>
+        <li><strong>Why k/n is impressive:</strong> With 1M keys and 10 servers, removing one server only remaps ~100K keys instead of ~900K with naïve hashing</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Hash Ring — Keys Map to Next Server Clockwise</div>
+        <svg viewBox="0 0 460 380" width="100%" style="max-width:460px">
+          <defs>
+            <marker id="arrowD" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0,0 7,2.5 0,5" fill="#8b90b8"/></marker>
+          </defs>
+          <!-- Ring -->
+          <circle cx="230" cy="190" r="140" fill="none" stroke="#2e3250" stroke-width="3"/>
+          <!-- Clockwise arrow indicator -->
+          <path d="M 330 60 A 140 140 0 0 1 370 130" fill="none" stroke="#8b90b8" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowD)"/>
+          <text x="375" y="85" fill="#8b90b8" font-size="10" font-family="sans-serif">clockwise</text>
+          <!-- Server S0 (top) -->
+          <circle cx="230" cy="50" r="22" fill="rgba(124,131,245,0.2)" stroke="#7c83f5" stroke-width="2.5"/>
+          <text x="230" y="55" text-anchor="middle" fill="#7c83f5" font-size="12" font-weight="700" font-family="sans-serif">S0</text>
+          <!-- Server S1 (right) -->
+          <circle cx="370" cy="190" r="22" fill="rgba(86,207,178,0.2)" stroke="#56cfb2" stroke-width="2.5"/>
+          <text x="370" y="195" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="700" font-family="sans-serif">S1</text>
+          <!-- Server S2 (bottom) -->
+          <circle cx="230" cy="330" r="22" fill="rgba(245,166,35,0.2)" stroke="#f5a623" stroke-width="2.5"/>
+          <text x="230" y="335" text-anchor="middle" fill="#f5a623" font-size="12" font-weight="700" font-family="sans-serif">S2</text>
+          <!-- Server S3 (left) -->
+          <circle cx="90" cy="190" r="22" fill="rgba(244,114,182,0.2)" stroke="#f472b6" stroke-width="2.5"/>
+          <text x="90" y="195" text-anchor="middle" fill="#f472b6" font-size="12" font-weight="700" font-family="sans-serif">S3</text>
+          <!-- Key K0 (between S3 and S0, top-left area) → maps to S0 -->
+          <circle cx="138" cy="87" r="12" fill="#f472b6" opacity="0.7"/>
+          <text x="138" y="91" text-anchor="middle" fill="#000" font-size="9" font-weight="700" font-family="sans-serif">K0</text>
+          <path d="M 149 78 Q 180 55 208 52" fill="none" stroke="#7c83f5" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowD)"/>
+          <!-- Key K1 (between S0 and S1, top-right area) → maps to S1 -->
+          <circle cx="330" cy="92" r="12" fill="#7c83f5" opacity="0.7"/>
+          <text x="330" y="96" text-anchor="middle" fill="#000" font-size="9" font-weight="700" font-family="sans-serif">K1</text>
+          <path d="M 340 102 Q 360 140 367 168" fill="none" stroke="#56cfb2" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowD)"/>
+          <!-- Key K2 (between S1 and S2, bottom-right) → maps to S2 -->
+          <circle cx="345" cy="285" r="12" fill="#56cfb2" opacity="0.7"/>
+          <text x="345" y="289" text-anchor="middle" fill="#000" font-size="9" font-weight="700" font-family="sans-serif">K2</text>
+          <path d="M 334 293 Q 290 320 252 328" fill="none" stroke="#f5a623" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowD)"/>
+          <!-- Key K3 (between S2 and S3, bottom-left) → maps to S3 -->
+          <circle cx="140" cy="295" r="12" fill="#f5a623" opacity="0.7"/>
+          <text x="140" y="299" text-anchor="middle" fill="#000" font-size="9" font-weight="700" font-family="sans-serif">K3</text>
+          <path d="M 130 286 Q 108 245 94 212" fill="none" stroke="#f472b6" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowD)"/>
+          <!-- Legend -->
+          <rect x="5" y="355" width="12" height="12" rx="3" fill="#7c83f5"/><text x="22" y="365" fill="#8b90b8" font-size="10" font-family="sans-serif">Server</text>
+          <circle cx="90" cy="361" r="6" fill="#8b90b8" opacity="0.7"/><text x="102" y="365" fill="#8b90b8" font-size="10" font-family="sans-serif">Key (walks clockwise to nearest server)</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Problem: Uneven Distribution — The "Hot Spot" Issue</div>
+      <div class="warn-box">
+        <div class="warn-label">Edge Case</div>
+        With few servers, positions on the ring may be clustered — Server A gets a small slice, Server B gets a huge slice. Server B becomes overloaded while A sits idle. This is the "hot partition" problem.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Solution: Virtual Nodes</strong> — each physical server gets <em>multiple</em> positions on the ring (e.g. Server A gets positions at 12°, 84°, 201°, 330°...)</li>
+        <li>These fake positions are called "virtual nodes" or "vnodes"</li>
+        <li>With 100+ virtual nodes per server, the distribution evens out dramatically via the law of large numbers</li>
+        <li><strong>Trade-off:</strong> More virtual nodes = better balance but more memory to store the ring (typically 100–200 vnodes per server is the sweet spot)</li>
+        <li><strong>Heterogeneous servers:</strong> Powerful servers can get more virtual nodes (proportional to capacity) — elegant way to weight servers differently</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Virtual Nodes — Each Server Gets Multiple Ring Positions</div>
+        <svg viewBox="0 0 460 370" width="100%" style="max-width:460px">
+          <!-- Ring -->
+          <circle cx="230" cy="180" r="130" fill="none" stroke="#2e3250" stroke-width="3"/>
+          <!-- S0 virtual nodes (purple) -->
+          <circle cx="230" cy="50" r="16" fill="rgba(124,131,245,0.25)" stroke="#7c83f5" stroke-width="2"/>
+          <text x="230" y="54" text-anchor="middle" fill="#7c83f5" font-size="9" font-weight="700" font-family="sans-serif">S0-a</text>
+          <circle cx="310" cy="290" r="16" fill="rgba(124,131,245,0.25)" stroke="#7c83f5" stroke-width="2"/>
+          <text x="310" y="294" text-anchor="middle" fill="#7c83f5" font-size="9" font-weight="700" font-family="sans-serif">S0-b</text>
+          <circle cx="108" cy="230" r="16" fill="rgba(124,131,245,0.25)" stroke="#7c83f5" stroke-width="2"/>
+          <text x="108" y="234" text-anchor="middle" fill="#7c83f5" font-size="9" font-weight="700" font-family="sans-serif">S0-c</text>
+          <!-- S1 virtual nodes (green) -->
+          <circle cx="330" cy="85" r="16" fill="rgba(86,207,178,0.25)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="330" y="89" text-anchor="middle" fill="#56cfb2" font-size="9" font-weight="700" font-family="sans-serif">S1-a</text>
+          <circle cx="150" cy="290" r="16" fill="rgba(86,207,178,0.25)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="150" y="294" text-anchor="middle" fill="#56cfb2" font-size="9" font-weight="700" font-family="sans-serif">S1-b</text>
+          <circle cx="360" cy="210" r="16" fill="rgba(86,207,178,0.25)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="360" y="214" text-anchor="middle" fill="#56cfb2" font-size="9" font-weight="700" font-family="sans-serif">S1-c</text>
+          <!-- S2 virtual nodes (orange) -->
+          <circle cx="115" cy="120" r="16" fill="rgba(245,166,35,0.25)" stroke="#f5a623" stroke-width="2"/>
+          <text x="115" y="124" text-anchor="middle" fill="#f5a623" font-size="9" font-weight="700" font-family="sans-serif">S2-a</text>
+          <circle cx="355" cy="145" r="16" fill="rgba(245,166,35,0.25)" stroke="#f5a623" stroke-width="2"/>
+          <text x="355" y="149" text-anchor="middle" fill="#f5a623" font-size="9" font-weight="700" font-family="sans-serif">S2-b</text>
+          <circle cx="230" cy="310" r="16" fill="rgba(245,166,35,0.25)" stroke="#f5a623" stroke-width="2"/>
+          <text x="230" y="314" text-anchor="middle" fill="#f5a623" font-size="9" font-weight="700" font-family="sans-serif">S2-c</text>
+          <!-- Legend -->
+          <rect x="50" y="345" width="12" height="12" rx="6" fill="#7c83f5"/><text x="67" y="355" fill="#7c83f5" font-size="10" font-weight="600" font-family="sans-serif">Server 0</text>
+          <rect x="160" y="345" width="12" height="12" rx="6" fill="#56cfb2"/><text x="177" y="355" fill="#56cfb2" font-size="10" font-weight="600" font-family="sans-serif">Server 1</text>
+          <rect x="270" y="345" width="12" height="12" rx="6" fill="#f5a623"/><text x="287" y="355" fill="#f5a623" font-size="10" font-weight="600" font-family="sans-serif">Server 2</text>
+          <!-- Label -->
+          <text x="230" y="185" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">3 vnodes each =</text>
+          <text x="230" y="198" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">even distribution</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Where It's Used in the Real World</div>
+      <table class="cmp-table">
+        <tr><th>System</th><th>How they use it</th></tr>
+        <tr><td><strong>Amazon DynamoDB</strong></td><td>Partitions data across storage nodes. Adding capacity adds nodes without redistributing all data</td></tr>
+        <tr><td><strong>Apache Cassandra</strong></td><td>Each row's partition key is hashed to a ring position to determine which replica set owns it</td></tr>
+        <tr><td><strong>Akamai CDN</strong></td><td>Routes user requests to the nearest edge server; consistent hashing minimizes cache invalidation when edge nodes come/go</td></tr>
+        <tr><td><strong>Redis Cluster</strong></td><td>Uses 16,384 hash slots (a form of consistent hashing) to distribute keys across nodes</td></tr>
+        <tr><td><strong>Discord chat</strong></td><td>Routes messages to the correct server shard for a given guild ID</td></tr>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="interview-section">
+        <div class="int-title">Interview Questions</div>
+        <div class="int-q">
+          <div class="int-q-item">
+            <div class="q-text">Why do we need consistent hashing? What problem does it solve?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Normal modulo hashing (<code>hash(key) % N</code>) requires remapping nearly all keys when N changes (a server is added/removed). In a cache cluster, this causes a thundering herd — all requests miss cache simultaneously and pound the database. Consistent hashing ensures only <code>1/N</code> of keys need remapping when one server changes, making the transition smooth and database-safe.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">What are virtual nodes and why are they needed?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">With few physical servers, their positions on the hash ring may cluster unevenly — one server could own 60% of the ring while another owns only 5%. Virtual nodes solve this by giving each server many positions on the ring (100–200 is typical). With many positions spread across the ring, each server ends up owning roughly equal shares. Bonus: servers with more RAM/CPU can get more virtual nodes to handle proportionally more traffic.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How would you handle a hot partition in consistent hashing?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Hot partitions happen when many popular keys hash to the same server. Fixes: (1) Increase virtual nodes for the overloaded server — splits its ring segment into smaller pieces. (2) Add a new server that takes over a slice of the hot server's range. (3) Use key splitting — append a random suffix to hot keys and scatter them across multiple servers. (4) Application-level caching (local cache) to absorb repeated reads for the same keys.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How does consistent hashing differ from Redis Cluster's approach?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Redis Cluster uses a <strong>fixed 16,384 hash slot</strong> approach — each key maps to one of 16,384 slots via CRC16, and slots are assigned to nodes. This is conceptually similar to consistent hashing but with a fixed ring size. Consistent hashing uses a continuous ring. Both minimize key movement on topology changes. Redis's approach is simpler to reason about and implement in client SDKs at the cost of less flexibility.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════ CHAPTER 6 ══════ -->
+<div class="chapter" id="ch6">
+  <div class="chapter-header">
+    <div class="ch-badge" style="background:color-mix(in srgb,var(--ch6) 15%,transparent);color:var(--ch6)">06</div>
+    <div class="ch-meta">
+      <h2 style="color:var(--ch6)">Design a Key-Value Store</h2>
+      <div class="subtitle">Distributed NoSQL · CAP Theorem · Quorum · LSM Tree</div>
+    </div>
+  </div>
+  <div class="chapter-body">
+
+    <div class="section">
+      <div class="section-title">CAP Theorem — The Fundamental Constraint</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — The Bank vs The Social Feed</div>
+        Imagine your bank balance. If you transfer $500 and immediately check your balance from a different ATM, you MUST see the updated balance. Stale data = real money problems. That's <strong>Consistency</strong>. Now imagine Instagram's feed. If a post takes 2 seconds to appear on all servers, that's fine — slightly stale is acceptable but you can't afford Instagram going down for everyone just because one data center lost power. That's <strong>Availability</strong>. The choice between these is CAP.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li>CAP: a distributed system can guarantee only <strong>2 of 3</strong>: Consistency, Availability, Partition Tolerance</li>
+        <li><strong>Partition Tolerance is non-negotiable</strong> — networks always partition eventually (cable cut, router crash). So the real choice is C vs A</li>
+        <li><strong>CP (Consistency + Partition Tolerance):</strong> If a partition happens, block writes until consistency is restored. Accept downtime, never return stale data. Examples: HBase, Zookeeper, traditional RDBMS</li>
+        <li><strong>AP (Availability + Partition Tolerance):</strong> During partition, keep serving (possibly stale) data. Sync up later. Examples: Cassandra, DynamoDB, CouchDB</li>
+        <li><strong>When to use CP:</strong> financial transactions, inventory management, anything where stale reads cause real harm</li>
+        <li><strong>When to use AP:</strong> social feeds, user profiles, product recommendations — stale by 1 second is fine</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">CAP Theorem — Pick Two (but P is mandatory)</div>
+        <svg viewBox="0 0 520 340" width="100%" style="max-width:520px">
+          <!-- Triangle -->
+          <polygon points="260,30 60,290 460,290" fill="none" stroke="#2e3250" stroke-width="2.5"/>
+          <!-- C vertex -->
+          <circle cx="260" cy="30" r="28" fill="rgba(124,131,245,0.2)" stroke="#7c83f5" stroke-width="2"/>
+          <text x="260" y="27" text-anchor="middle" fill="#7c83f5" font-size="16" font-weight="800" font-family="sans-serif">C</text>
+          <text x="260" y="42" text-anchor="middle" fill="#7c83f5" font-size="8" font-family="sans-serif">Consistency</text>
+          <!-- A vertex -->
+          <circle cx="60" cy="290" r="28" fill="rgba(86,207,178,0.2)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="60" y="287" text-anchor="middle" fill="#56cfb2" font-size="16" font-weight="800" font-family="sans-serif">A</text>
+          <text x="60" y="302" text-anchor="middle" fill="#56cfb2" font-size="8" font-family="sans-serif">Availability</text>
+          <!-- P vertex -->
+          <circle cx="460" cy="290" r="28" fill="rgba(245,166,35,0.2)" stroke="#f5a623" stroke-width="2"/>
+          <text x="460" y="287" text-anchor="middle" fill="#f5a623" font-size="16" font-weight="800" font-family="sans-serif">P</text>
+          <text x="460" y="302" text-anchor="middle" fill="#f5a623" font-size="8" font-family="sans-serif">Partition Tol.</text>
+          <!-- CP edge label -->
+          <text x="385" y="148" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="700" font-family="sans-serif" transform="rotate(40,385,148)">CP</text>
+          <text x="410" y="178" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">HBase</text>
+          <text x="410" y="192" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">ZooKeeper</text>
+          <!-- AP edge label -->
+          <text x="240" y="305" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="700" font-family="sans-serif">AP</text>
+          <text x="240" y="325" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">Cassandra · DynamoDB · CouchDB</text>
+          <!-- CA edge label (crossed out) -->
+          <text x="130" y="148" text-anchor="middle" fill="#f56565" font-size="11" font-weight="700" font-family="sans-serif" transform="rotate(-40,130,148)">CA</text>
+          <text x="100" y="175" text-anchor="middle" fill="#f56565" font-size="9" font-family="sans-serif">Single-node RDBMS</text>
+          <text x="100" y="189" text-anchor="middle" fill="#f56565" font-size="9" font-family="sans-serif">(not distributed)</text>
+          <line x1="67" y1="178" x2="133" y2="178" stroke="#f56565" stroke-width="1.5"/>
+          <!-- Must-have callout -->
+          <rect x="370" y="225" width="145" height="40" rx="6" fill="rgba(245,166,35,0.1)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="442" y="243" text-anchor="middle" fill="#f5a623" font-size="10" font-weight="700" font-family="sans-serif">P is NON-NEGOTIABLE</text>
+          <text x="442" y="257" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">Networks always partition</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Data Replication — Don't Lose Data</div>
+      <ul class="notes">
+        <li><strong>Why replicate?</strong> A single-node store loses all data if that machine dies. N replicas mean N-1 failures before data loss</li>
+        <li><strong>How:</strong> Use consistent hashing ring. When writing key K, walk clockwise from K's position and write to the next N unique <em>physical</em> servers (skip virtual nodes of same physical machine)</li>
+        <li><strong>Typical N=3:</strong> Each piece of data lives on 3 different machines in different racks or data centers</li>
+        <li><strong>Cross-DC replication:</strong> Spread replicas across availability zones to survive data center outages</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Quorum Consensus — Read/Write Trade-offs</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — A Committee Vote</div>
+        To pass a law, you need majority approval. Quorum works the same: to "confirm" a write, you need W out of N servers to acknowledge it. To "confirm" a read, you need R out of N servers to agree. The key insight: if W + R > N, at least one server that participated in the write must also participate in the read — guaranteeing you see the latest value.
+      </div>
+      <table class="cmp-table" style="margin-top:12px">
+        <tr><th>Config (N=3)</th><th>W</th><th>R</th><th>What you get</th><th>Trade-off</th></tr>
+        <tr><td>Fast writes</td><td>1</td><td>3</td><td>Strong consistency on reads</td><td>Write fast, read slow</td></tr>
+        <tr><td>Fast reads</td><td>3</td><td>1</td><td>Strong consistency on writes</td><td>Write slow, read fast</td></tr>
+        <tr><td><strong>Balanced ✓</strong></td><td>2</td><td>2</td><td>Strong consistency both ways</td><td>Both moderately fast</td></tr>
+        <tr><td>Weak consistency</td><td>1</td><td>1</td><td>Eventual consistency only</td><td>Very fast, may be stale</td></tr>
+      </table>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Quorum Overlap — Why W+R > N Guarantees Consistency (N=3, W=2, R=2)</div>
+        <svg viewBox="0 0 620 220" width="100%" style="max-width:620px">
+          <!-- Node 1 -->
+          <circle cx="140" cy="110" r="50" fill="rgba(86,207,178,0.12)" stroke="#56cfb2" stroke-width="2"/>
+          <circle cx="140" cy="110" r="50" fill="rgba(96,165,250,0.12)" stroke="#60a5fa" stroke-width="2" stroke-dasharray="6,3"/>
+          <text x="140" y="100" text-anchor="middle" fill="#e8eaf6" font-size="14" font-weight="700" font-family="sans-serif">Node 1</text>
+          <text x="140" y="118" text-anchor="middle" fill="#f472b6" font-size="11" font-weight="700" font-family="sans-serif">W + R</text>
+          <text x="140" y="135" text-anchor="middle" fill="#f472b6" font-size="9" font-family="sans-serif">OVERLAP!</text>
+          <!-- Star highlight -->
+          <circle cx="140" cy="110" r="54" fill="none" stroke="#f472b6" stroke-width="2.5" stroke-dasharray="3,5"/>
+          <!-- Node 2 -->
+          <circle cx="310" cy="110" r="50" fill="rgba(86,207,178,0.12)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="310" y="105" text-anchor="middle" fill="#e8eaf6" font-size="14" font-weight="700" font-family="sans-serif">Node 2</text>
+          <text x="310" y="123" text-anchor="middle" fill="#56cfb2" font-size="11" font-weight="600" font-family="sans-serif">Write only</text>
+          <!-- Node 3 -->
+          <circle cx="480" cy="110" r="50" fill="rgba(96,165,250,0.12)" stroke="#60a5fa" stroke-width="2" stroke-dasharray="6,3"/>
+          <text x="480" y="105" text-anchor="middle" fill="#e8eaf6" font-size="14" font-weight="700" font-family="sans-serif">Node 3</text>
+          <text x="480" y="123" text-anchor="middle" fill="#60a5fa" font-size="11" font-weight="600" font-family="sans-serif">Read only</text>
+          <!-- Labels -->
+          <text x="225" y="30" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="700" font-family="sans-serif">W = 2 (write to 2 nodes)</text>
+          <line x1="140" y1="38" x2="140" y2="56" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <line x1="310" y1="38" x2="310" y2="56" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <text x="395" y="30" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="700" font-family="sans-serif">R = 2 (read from 2 nodes)</text>
+          <line x1="140" y1="38" x2="140" y2="56" stroke="#60a5fa" stroke-width="1.5" stroke-dasharray="4,3"/>
+          <line x1="480" y1="38" x2="480" y2="56" stroke="#60a5fa" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <!-- Bottom explanation -->
+          <rect x="80" y="178" width="460" height="32" rx="6" fill="rgba(244,114,182,0.1)" stroke="#f472b6" stroke-width="1"/>
+          <text x="310" y="199" text-anchor="middle" fill="#f472b6" font-size="11" font-weight="600" font-family="sans-serif">Node 1 participated in BOTH write and read → guarantees latest value is always seen</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Conflict Resolution — Vector Clocks</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Google Docs vs. Dropbox</div>
+        Two people edit the same document offline. When they reconnect, who wins? Google Docs merges changes (conflict resolution). Dropbox creates two conflicting copies and asks you to choose. Distributed key-value stores face the same problem — two writes to the same key on different replicas, which one is "correct"?
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Versioning:</strong> Each write creates a new version (never overwrite). Conflicts arise when two versions neither dominates the other</li>
+        <li><strong>Vector clock:</strong> A list of <code>[server, version]</code> pairs. Every write increments the version for the server that handled it</li>
+        <li>If clock A dominates clock B (all A's values ≥ B's), A is newer — no conflict</li>
+        <li>If neither dominates (A has higher v on server 1, B has higher v on server 2) → conflict, needs resolution</li>
+        <li><strong>Resolution pushed to client:</strong> Amazon's shopping cart example — if two devices add different items offline, the cart merges both (union). The client sees both versions and merges them</li>
+        <li><strong>Downside:</strong> Vector clocks grow with number of servers that touched the key. Cap size by removing oldest entries (may lead to false conflicts)</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Vector Clock — Step-by-Step Conflict Example</div>
+        <svg viewBox="0 0 660 270" width="100%" style="max-width:660px">
+          <rect x="10" y="10" width="145" height="70" rx="8" fill="rgba(124,131,245,0.08)" stroke="#7c83f5" stroke-width="1.5"/>
+          <text x="82" y="28" text-anchor="middle" fill="#7c83f5" font-size="10" font-weight="700" font-family="sans-serif">STEP 1</text>
+          <text x="82" y="44" text-anchor="middle" fill="#e8eaf6" font-size="11" font-family="sans-serif">Client writes to S1</text>
+          <rect x="30" y="52" width="105" height="20" rx="4" fill="#1a1d2e" stroke="#7c83f5" stroke-width="1"/>
+          <text x="82" y="67" text-anchor="middle" fill="#7c83f5" font-size="11" font-weight="700" font-family="monospace">[S1:1]</text>
+          <line x1="160" y1="45" x2="180" y2="45" stroke="#8b90b8" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <rect x="185" y="10" width="155" height="70" rx="8" fill="rgba(124,131,245,0.08)" stroke="#7c83f5" stroke-width="1.5"/>
+          <text x="262" y="28" text-anchor="middle" fill="#7c83f5" font-size="10" font-weight="700" font-family="sans-serif">STEP 2</text>
+          <text x="262" y="44" text-anchor="middle" fill="#e8eaf6" font-size="11" font-family="sans-serif">Write to S1 again</text>
+          <rect x="205" y="52" width="115" height="20" rx="4" fill="#1a1d2e" stroke="#7c83f5" stroke-width="1"/>
+          <text x="262" y="67" text-anchor="middle" fill="#7c83f5" font-size="11" font-weight="700" font-family="monospace">[S1:2]</text>
+          <line x1="345" y1="45" x2="375" y2="45" stroke="#8b90b8" stroke-width="1.5"/>
+          <line x1="375" y1="45" x2="405" y2="22" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <line x1="375" y1="45" x2="405" y2="72" stroke="#f5a623" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <rect x="410" y="0" width="235" height="50" rx="8" fill="rgba(86,207,178,0.08)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="527" y="17" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="sans-serif">3a: Client A writes via S1</text>
+          <rect x="450" y="24" width="155" height="20" rx="4" fill="#1a1d2e" stroke="#56cfb2" stroke-width="1"/>
+          <text x="527" y="39" text-anchor="middle" fill="#56cfb2" font-size="11" font-weight="700" font-family="monospace">[S1:3]</text>
+          <rect x="410" y="58" width="235" height="50" rx="8" fill="rgba(245,166,35,0.08)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="527" y="75" text-anchor="middle" fill="#f5a623" font-size="10" font-weight="700" font-family="sans-serif">3b: Client B writes via S2</text>
+          <rect x="430" y="82" width="195" height="20" rx="4" fill="#1a1d2e" stroke="#f5a623" stroke-width="1"/>
+          <text x="527" y="97" text-anchor="middle" fill="#f5a623" font-size="11" font-weight="700" font-family="monospace">[S1:2, S2:1]</text>
+          <rect x="50" y="130" width="560" height="130" rx="10" fill="rgba(245,101,101,0.06)" stroke="#f56565" stroke-width="2"/>
+          <text x="330" y="152" text-anchor="middle" fill="#f56565" font-size="13" font-weight="800" font-family="sans-serif">CONFLICT DETECTED!</text>
+          <text x="330" y="172" text-anchor="middle" fill="#e8eaf6" font-size="11" font-family="sans-serif">Neither version dominates the other:</text>
+          <rect x="80" y="185" width="170" height="28" rx="5" fill="#1a1d2e" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="165" y="204" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="700" font-family="monospace">[S1:3]</text>
+          <text x="165" y="230" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">S1 higher (3 > 2)</text>
+          <text x="330" y="204" text-anchor="middle" fill="#f56565" font-size="14" font-weight="800" font-family="sans-serif">vs</text>
+          <rect x="380" y="185" width="200" height="28" rx="5" fill="#1a1d2e" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="480" y="204" text-anchor="middle" fill="#f5a623" font-size="12" font-weight="700" font-family="monospace">[S1:2, S2:1]</text>
+          <text x="480" y="230" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">S2 higher (1 > 0)</text>
+          <text x="330" y="254" text-anchor="middle" fill="#f56565" font-size="11" font-weight="600" font-family="sans-serif">Client must resolve (e.g. merge both values)</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Failure Detection & Handling</div>
+      <ul class="notes">
+        <li><strong>Gossip protocol:</strong> Each node maintains a membership list (node ID + heartbeat counter). Every second, gossip to 2–3 random nodes. If a node's heartbeat hasn't increased after N rounds → suspect it's dead. Like office rumors — news spreads quickly without a central coordinator</li>
+        <li><strong>Sloppy quorum:</strong> The "first W/R healthy servers" during a partition, not necessarily the intended replicas. Keeps availability high</li>
+        <li><strong>Hinted handoff:</strong> If node A is down, node B handles A's writes and stores a "hint" (a note saying "deliver this to A when it comes back"). When A recovers, B ships the hint. Like leaving a note for a sick coworker</li>
+        <li><strong>Anti-entropy (Merkle Trees):</strong> To sync two replicas, don't compare every key — instead compare a tree of hashes. If top hashes match, everything is in sync. If not, drill down to find exactly which keys differ. Minimizes data transfer for repair</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">Merkle Tree — Efficiently Finding Which Data Differs</div>
+        <svg viewBox="0 0 620 250" width="100%" style="max-width:620px">
+          <text x="155" y="16" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="700" font-family="sans-serif">Replica A</text>
+          <text x="465" y="16" text-anchor="middle" fill="#f5a623" font-size="12" font-weight="700" font-family="sans-serif">Replica B</text>
+          <!-- Replica A tree: Root -->
+          <rect x="110" y="28" width="90" height="26" rx="6" fill="rgba(86,207,178,0.15)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="155" y="46" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="monospace">H(1234)</text>
+          <line x1="130" y1="54" x2="80" y2="74" stroke="#2e3250" stroke-width="1.5"/>
+          <line x1="180" y1="54" x2="230" y2="74" stroke="#2e3250" stroke-width="1.5"/>
+          <!-- A Level 2 -->
+          <rect x="35" y="74" width="90" height="26" rx="6" fill="rgba(245,101,101,0.12)" stroke="#f56565" stroke-width="1.5"/>
+          <text x="80" y="92" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">H(12)</text>
+          <rect x="185" y="74" width="90" height="26" rx="6" fill="#252840" stroke="#2e3250" stroke-width="1"/>
+          <text x="230" y="92" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="monospace">H(34)</text>
+          <!-- A Level 3 -->
+          <line x1="60" y1="100" x2="35" y2="120" stroke="#2e3250" stroke-width="1.5"/>
+          <line x1="100" y1="100" x2="125" y2="120" stroke="#2e3250" stroke-width="1.5"/>
+          <rect x="5" y="120" width="60" height="24" rx="5" fill="rgba(245,101,101,0.2)" stroke="#f56565" stroke-width="2"/>
+          <text x="35" y="137" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">K1:A</text>
+          <rect x="95" y="120" width="60" height="24" rx="5" fill="#252840" stroke="#2e3250" stroke-width="1"/>
+          <text x="125" y="137" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="monospace">K2:B</text>
+          <!-- Replica B tree: Root -->
+          <rect x="420" y="28" width="90" height="26" rx="6" fill="rgba(245,166,35,0.15)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="465" y="46" text-anchor="middle" fill="#f5a623" font-size="10" font-weight="700" font-family="monospace">H(1234)'</text>
+          <line x1="440" y1="54" x2="390" y2="74" stroke="#2e3250" stroke-width="1.5"/>
+          <line x1="490" y1="54" x2="540" y2="74" stroke="#2e3250" stroke-width="1.5"/>
+          <!-- B Level 2 -->
+          <rect x="345" y="74" width="90" height="26" rx="6" fill="rgba(245,101,101,0.12)" stroke="#f56565" stroke-width="1.5"/>
+          <text x="390" y="92" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">H(12)'</text>
+          <rect x="495" y="74" width="90" height="26" rx="6" fill="#252840" stroke="#2e3250" stroke-width="1"/>
+          <text x="540" y="92" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="monospace">H(34)</text>
+          <!-- B Level 3 -->
+          <line x1="370" y1="100" x2="345" y2="120" stroke="#2e3250" stroke-width="1.5"/>
+          <line x1="410" y1="100" x2="435" y2="120" stroke="#2e3250" stroke-width="1.5"/>
+          <rect x="315" y="120" width="60" height="24" rx="5" fill="rgba(245,101,101,0.2)" stroke="#f56565" stroke-width="2"/>
+          <text x="345" y="137" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">K1:X</text>
+          <rect x="405" y="120" width="60" height="24" rx="5" fill="#252840" stroke="#2e3250" stroke-width="1"/>
+          <text x="435" y="137" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="monospace">K2:B</text>
+          <!-- Compare markers -->
+          <text x="310" y="46" text-anchor="middle" fill="#f56565" font-size="16" font-weight="800" font-family="sans-serif">!=</text>
+          <text x="310" y="90" text-anchor="middle" fill="#f56565" font-size="14" font-weight="800" font-family="sans-serif">!=</text>
+          <text x="460" y="90" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="800" font-family="sans-serif">=</text>
+          <!-- Explanation -->
+          <rect x="50" y="165" width="520" height="75" rx="8" fill="rgba(124,131,245,0.06)" stroke="#7c83f5" stroke-width="1"/>
+          <text x="310" y="185" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="700" font-family="sans-serif">How it finds the mismatch in 3 steps:</text>
+          <text x="310" y="203" text-anchor="middle" fill="#8b90b8" font-size="11" font-family="sans-serif">1. Root hashes differ → drill down</text>
+          <text x="310" y="218" text-anchor="middle" fill="#8b90b8" font-size="11" font-family="sans-serif">2. Left child H(12) differs, right H(34) matches → skip right subtree</text>
+          <text x="310" y="233" text-anchor="middle" fill="#f56565" font-size="11" font-weight="600" font-family="sans-serif">3. Found: K1 is "A" vs "X" → sync only K1!</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Write &amp; Read Path — LSM Tree + SSTable</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Sticky Notes → Folder → Filing Cabinet</div>
+        You jot quick notes on sticky notes (Memtable in RAM — fast). When sticky notes pile up, you copy them to a folder (SSTable on disk). Over time, folders are merged into organized filing cabinet drawers (compaction). To find something, check your desk first, then recent folders, then older ones.
+      </div>
+      <div class="flow" style="margin-bottom:10px;margin-top:12px">
+        <div class="flow-node" style="color:var(--ch6)">Write Request</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">Commit Log (disk, sequential)</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">Memtable (RAM, sorted)</div>
+        <div class="flow-arrow">→ when full →</div>
+        <div class="flow-node">SSTable (disk, immutable)</div>
+      </div>
+      <div class="flow" style="margin-top:8px">
+        <div class="flow-node" style="color:var(--ch6)">Read Request</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">Bloom Filter (skip SSTables)</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">Memtable</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-node">SSTable L0 → L1 → ...</div>
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Commit log (WAL):</strong> Written to disk first, sequentially (fast). If crash before Memtable flush → replay log on restart</li>
+        <li><strong>Memtable:</strong> In-memory sorted map (like a Red-Black tree). Blazingly fast writes and reads for hot data</li>
+        <li><strong>SSTable:</strong> When Memtable exceeds size threshold, flush to disk as sorted, immutable file. Multiple SSTables are periodically merged (compacted) to reclaim space and speed up reads</li>
+        <li><strong>Bloom filter:</strong> A probabilistic data structure — "definitely not in this SSTable" or "might be here." Skips reading SSTables that definitely don't contain the key. Makes reads much faster</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="interview-section">
+        <div class="int-title">Interview Questions</div>
+        <div class="int-q">
+          <div class="int-q-item">
+            <div class="q-text">Explain CAP theorem. Which would you pick for a banking app vs. a social media app?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">CAP: you can only guarantee 2 of {Consistency, Availability, Partition Tolerance}. Since partitions are unavoidable, choose C or A. <strong>Banking → CP:</strong> A user sees an incorrect balance is a serious bug. Worth accepting brief unavailability to ensure reads are never stale. <strong>Social media → AP:</strong> A post appearing 500ms late on a different device is invisible to users, but crashing the feed for everyone during a network blip is very visible. Accept eventual consistency.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">What is a quorum? How do W + R > N guarantee strong consistency?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Quorum = minimum number of nodes that must agree for an operation to succeed. With N=3, W=2, R=2: any write is confirmed by 2 nodes. Any read consults 2 nodes. Since W+R=4 > N=3, at least 1 node that confirmed the write must be in the read set. That node returns the latest version. This overlap guarantees you never read data older than the last committed write.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">What is gossip protocol and how does it detect failures?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Gossip protocol is a decentralized failure detection mechanism. Each node keeps a membership list with heartbeat counters. Every few seconds, each node increments its own heartbeat and sends its list to a few random peers. Peers merge lists, taking the max heartbeat per node. If a node's heartbeat hasn't increased after a timeout threshold (e.g. 10 gossip rounds), it's marked suspicious → suspected dead → declared dead after further confirmation. No central coordinator needed — information spreads like a virus through the cluster.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">Why use LSM Trees instead of B-Trees for a write-heavy key-value store?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">B-Trees do random I/O — updating a value means seeking to its position on disk and overwriting. This is expensive on spinning disks (HDDs) and causes write amplification on SSDs. LSM Trees (Log-Structured Merge Trees) convert random writes into sequential writes — append to commit log, buffer in memory, then flush as sequential SSTable files. Sequential I/O is 10–100× faster than random I/O. The trade-off: reads may need to check multiple SSTables (bloom filters mitigate this). Used by: RocksDB, Cassandra, LevelDB.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How do vector clocks detect and resolve write conflicts?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">A vector clock is a list of (server, version) pairs. Each server increments its own counter on every write. To check if version A supersedes B: if every counter in A ≥ corresponding counter in B (and at least one is strictly greater), A is newer — no conflict. If A has higher counter on server1 but B has higher counter on server2, neither dominates — there's a conflict. The application (or a merge function) must resolve it. Amazon DynamoDB uses this for shopping cart merges — union of items from both conflicting versions.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════ CHAPTER 7 ══════ -->
+<div class="chapter" id="ch7">
+  <div class="chapter-header">
+    <div class="ch-badge" style="background:color-mix(in srgb,var(--ch7) 15%,transparent);color:var(--ch7)">07</div>
+    <div class="ch-meta">
+      <h2 style="color:var(--ch7)">Design a Unique ID Generator in Distributed Systems</h2>
+      <div class="subtitle">Global uniqueness · Time-sortable · 64-bit · Twitter Snowflake</div>
+    </div>
+  </div>
+  <div class="chapter-body">
+
+    <div class="section">
+      <div class="section-title">Why Not Just Use a Database Auto-Increment?</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — DMV Ticket Numbers</div>
+        At a DMV, there's one machine that dispenses ticket numbers sequentially. Works great for one building. But imagine 100 DMV offices each needing to issue globally unique ticket numbers without talking to each other. You can't have one central machine — it becomes a bottleneck. This is exactly the problem with DB auto-increment at scale.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li>A single DB auto-increment is a <strong>bottleneck and single point of failure</strong> — all ID generation goes through one machine</li>
+        <li><strong>Multi-master DB</strong> (each server increments by N): Server 1 generates 1, 3, 5... Server 2 generates 2, 4, 6... Works but IDs aren't time-sortable and adding servers is complex</li>
+        <li><strong>UUID (128-bit):</strong> Globally unique, no coordination needed, but 128 bits is large, not sortable, not numeric — bad for DB primary keys (index fragmentation)</li>
+        <li><strong>Ticket server (Flickr's approach):</strong> Dedicated DB server just for ID generation. Simple, but single point of failure</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Requirements — What the Ideal ID Looks Like</div>
+      <div class="kv-grid">
+        <div class="kv-item"><div class="k">Uniqueness</div><div class="v">Globally unique (no collisions across all machines)</div></div>
+        <div class="kv-item"><div class="k">Numeric only</div><div class="v">64-bit integer (fits in a long)</div></div>
+        <div class="kv-item"><div class="k">Sortable by time</div><div class="v">IDs generated later should be larger</div></div>
+        <div class="kv-item"><div class="k">High throughput</div><div class="v">10,000+ IDs per second per machine</div></div>
+        <div class="kv-item"><div class="k">No coordination</div><div class="v">Machines generate IDs independently</div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Twitter Snowflake — The Solution</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — A License Plate</div>
+        A license plate encodes multiple pieces of info in a fixed format: state code + year + serial number. Each part has a fixed width. You can read the plate and instantly know which state issued it and roughly when. Snowflake IDs are the same — a fixed-width 64-bit number where different bit segments encode different info.
+      </div>
+      <div class="snowflake-viz" style="margin-top:12px">
+        <div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:12px">
+          <div style="background:#f472b6;color:#000;padding:6px 8px;border-radius:5px;font-weight:700;font-size:11px;text-align:center;min-width:40px">1 bit<br>Sign</div>
+          <div style="background:#f5a623;color:#000;padding:6px 8px;border-radius:5px;font-weight:700;font-size:11px;text-align:center;flex:4">41 bits — Timestamp (ms since custom epoch)</div>
+          <div style="background:#56cfb2;color:#000;padding:6px 8px;border-radius:5px;font-weight:700;font-size:11px;text-align:center;min-width:50px">5 bits<br>DC ID</div>
+          <div style="background:#60a5fa;color:#000;padding:6px 8px;border-radius:5px;font-weight:700;font-size:11px;text-align:center;min-width:60px">5 bits<br>Machine</div>
+          <div style="background:#7c83f5;color:#000;padding:6px 8px;border-radius:5px;font-weight:700;font-size:11px;text-align:center;flex:2">12 bits — Sequence</div>
+        </div>
+        <div style="color:var(--muted);font-size:11.5px">← Most significant bit                                                                                                Least significant bit →</div>
+      </div>
+      <ul class="notes" style="margin-top:16px">
+        <li><strong>Bit 63 (Sign):</strong> Always 0 — ensures the 64-bit number is positive (Java's long is signed)</li>
+        <li><strong>Bits 22–62 (41-bit timestamp):</strong> Milliseconds since a custom epoch (e.g. Twitter uses Nov 04, 2010). 2⁴¹ ms ≈ 69 years of IDs before overflow. Larger timestamps = larger IDs = time-sorted automatically!</li>
+        <li><strong>Bits 17–21 (5-bit datacenter ID):</strong> 2⁵ = 32 possible data centers. Each DC is assigned a unique ID at startup</li>
+        <li><strong>Bits 12–16 (5-bit machine ID):</strong> 32 machines per DC × 32 DCs = 1,024 total machines can generate IDs simultaneously with zero coordination</li>
+        <li><strong>Bits 0–11 (12-bit sequence):</strong> Counter that resets to 0 every millisecond. 2¹² = 4,096 IDs per millisecond per machine = ~4 million IDs/sec per machine</li>
+        <li><strong>Why IDs are sortable:</strong> Timestamp is the high-order bits, so sorting 64-bit IDs numerically gives you time order</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">The Clock Skew Problem</div>
+      <div class="warn-box">
+        <div class="warn-label">Critical Edge Case</div>
+        NTP (Network Time Protocol) can cause system clock to go backward slightly. If clock goes back 5ms, the machine might generate IDs with a timestamp from "the past" — colliding with IDs already generated in that millisecond range!
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Detection:</strong> Track the last-used timestamp. If current time < last timestamp, the clock went backward</li>
+        <li><strong>Fix:</strong> Pause ID generation until current time catches up to last timestamp. For small skews (&lt;10ms) this pause is imperceptible</li>
+        <li><strong>Large skews:</strong> Log a critical alert — investigate the NTP configuration. Consider using a monotonic clock that never goes backward</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="interview-section">
+        <div class="int-title">Interview Questions</div>
+        <div class="int-q">
+          <div class="int-q-item">
+            <div class="q-text">Why is UUID not a good choice for a distributed ID generator?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">UUIDs are 128-bit (vs. 64-bit for Snowflake), so they take twice the storage. They're not time-sortable (random UUID v4 or non-sequential UUID v1), which causes B-tree index fragmentation — as new IDs are inserted randomly throughout the index, not at the end, causing expensive page splits and cache misses. They're also non-numeric strings, which require more space in joins and comparisons. Snowflake IDs are 64-bit integers that fit in a database BIGINT column, are auto-sorted by time, and are far more index-friendly.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How many IDs per second can a single Snowflake machine generate?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">12-bit sequence = 4,096 IDs per millisecond = ~4,096,000 IDs per second per machine. With 1,024 machines (32 DCs × 32 machines), that's about 4 billion IDs/second globally. Twitter's actual peak is a few million tweets/day — Snowflake vastly overprovisioned, which is fine. The math: 4096 IDs/ms × 1000 ms/sec = 4,096,000 IDs/sec/machine.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How long will 41-bit timestamp Snowflake IDs last before they overflow?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">2⁴¹ milliseconds = 2,199,023,255,552 ms ÷ 1000 ÷ 60 ÷ 60 ÷ 24 ÷ 365 ≈ 69.7 years. Twitter chose a custom epoch of Nov 4, 2010, so IDs will be valid until around 2079. After that, the timestamp bits overflow. Solution: shift the custom epoch forward before overflow, or migrate to a larger ID scheme. (Fun fact: this is a "Y2K38" type problem for Snowflake systems.)</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">What happens if two machines have the same machine ID in Snowflake?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">They would generate identical IDs at the same millisecond for the same sequence number — a collision catastrophe. Prevention: machine IDs must be assigned and managed centrally at startup. Common approaches: (1) Use Zookeeper to atomically assign and lease machine IDs. (2) Store machine IDs in a config DB with uniqueness constraints. (3) Assign IDs based on host IP (risky — IPs can be reused). Zookeeper is the standard production approach — it provides distributed coordination with atomic operations.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════ CHAPTER 8 ══════ -->
+<div class="chapter" id="ch8">
+  <div class="chapter-header">
+    <div class="ch-badge" style="background:color-mix(in srgb,var(--ch8) 15%,transparent);color:var(--ch8)">08</div>
+    <div class="ch-meta">
+      <h2 style="color:var(--ch8)">Design a URL Shortener</h2>
+      <div class="subtitle">Hashing · Base62 · HTTP Redirect · Read-heavy caching</div>
+    </div>
+  </div>
+  <div class="chapter-body">
+
+    <div class="section">
+      <div class="section-title">What Are We Building?</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Coat Check at a Restaurant</div>
+        You walk in with a big coat (long URL). The coat check gives you a small ticket (short code). The ticket is easy to carry around. When you want your coat back, you hand in the ticket and get the full coat. The system needs to: issue unique tickets, store the ticket-to-coat mapping, and look up coats quickly when tickets are returned.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li>Input: <code>https://www.example.com/very/long/path/that/is/hard/to/share?utm_source=...</code></li>
+        <li>Output: <code>https://tinyurl.com/abc123</code> → redirects to the original URL</li>
+        <li><strong>Two core operations:</strong> (1) Shorten: long URL → short code. (2) Expand: short code → redirect to long URL</li>
+        <li><strong>Traffic estimate:</strong> 100M URLs shortened per day = 1,160 writes/sec. Read:write = 100:1 = 116,000 reads/sec. Very read-heavy → optimize for reads</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">API Design</div>
+      <ul class="notes">
+        <li><code>POST /api/v1/data/shorten</code> — body: <code>{"longUrl": "https://..."}</code> → response: <code>{"shortUrl": "https://tinyurl.com/abc123"}</code></li>
+        <li><code>GET /{shortCode}</code> → HTTP 301 or 302 redirect to long URL</li>
+        <li><strong>Idempotency:</strong> If the same long URL is shortened twice, should we return the same short URL? Yes for deduplication, but it requires checking existence before insert (a DB read per write). Trade-off: simpler implementation generates a new code each time</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">301 vs 302 Redirect — A Critical Detail</div>
+      <table class="cmp-table">
+        <tr><th>Code</th><th>Meaning</th><th>Browser Caches?</th><th>Server Sees Subsequent Requests?</th><th>Best For</th></tr>
+        <tr>
+          <td><strong style="color:var(--ch5)">301 Permanent</strong></td>
+          <td>This URL has moved permanently</td>
+          <td>Yes — browser caches and redirects locally</td>
+          <td>No — after first visit, browser goes directly to destination</td>
+          <td>Reduce server load, save bandwidth. Sacrifice click analytics</td>
+        </tr>
+        <tr>
+          <td><strong style="color:var(--warn)">302 Temporary</strong></td>
+          <td>This URL is temporarily elsewhere</td>
+          <td>No — browser asks server every time</td>
+          <td>Yes — every redirect goes through your server</td>
+          <td>Track every click. Full analytics. Higher server load</td>
+        </tr>
+      </table>
+      <div class="highlight" style="border-color:var(--ch8);margin-top:12px">
+        <strong>Interview tip:</strong> If the interviewer asks "how do you track clicks?" — use 302. If they ask "how do you minimize latency/cost?" — use 301. If analytics are important (most commercial URL shorteners), 302 is the right answer.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Two Approaches to Generate Short Codes</div>
+      <div class="algo-grid">
+        <div class="algo-card" style="border-top:3px solid var(--warn)">
+          <h4 style="color:var(--warn)">Approach 1: Hash + Collision Resolution</h4>
+          <ul>
+            <li>Hash the long URL: MD5 or SHA-256 → 128-bit output</li>
+            <li>Take first 7 characters of the hash</li>
+            <li>Collision: if that short code already maps to a different long URL, append a suffix to the long URL and re-hash</li>
+            <li>Use bloom filter to quickly check if short code exists before DB query</li>
+            <li class="bad">✗ Must query DB on every write to check collision</li>
+            <li class="bad">✗ Hard to guarantee URL-safe characters</li>
+          </ul>
+        </div>
+        <div class="algo-card" style="border-top:3px solid var(--ch5)">
+          <h4 style="color:var(--ch5)">Approach 2: Base62 Encoding ✓ (Recommended)</h4>
+          <ul>
+            <li>Generate a unique 64-bit ID (using Snowflake or DB auto-increment)</li>
+            <li>Encode the ID in Base62 (digits 0-9, a-z, A-Z)</li>
+            <li>62⁷ ≈ 3.5 trillion unique 7-char codes</li>
+            <li>ID 123456789 → Base62 → "8M0kX"</li>
+            <li class="good">✓ Zero collisions by design</li>
+            <li class="good">✓ No DB lookup needed during creation</li>
+            <li class="bad">✗ IDs are predictable (sequentially enumerable)</li>
+          </ul>
+        </div>
+      </div>
+      <div class="analogy" style="margin-top:12px">
+        <div class="analogy-label">Why Base62?</div>
+        Think of it like a number system with 62 digits instead of 10. Just as decimal number 255 is "FF" in hex (base 16), we can express large numbers very compactly in base 62. The number 3,521,614,606,208 expressed in base 62 with 7 characters gives us ~3.5 trillion unique short codes.
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Full System Architecture</div>
+      <div class="diagram-box">
+        <div class="diagram-label">URL Shortener — Write Path vs Read Path</div>
+        <svg viewBox="0 0 700 340" width="100%" style="max-width:700px">
+          <defs>
+            <marker id="arrowG" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0,0 7,2.5 0,5" fill="#56cfb2"/></marker>
+            <marker id="arrowB" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0,0 7,2.5 0,5" fill="#60a5fa"/></marker>
+          </defs>
+          <!-- WRITE PATH (left side) -->
+          <text x="170" y="18" text-anchor="middle" fill="#56cfb2" font-size="13" font-weight="800" font-family="sans-serif">WRITE PATH (Shorten)</text>
+          <!-- Step boxes -->
+          <rect x="100" y="28" width="140" height="30" rx="6" fill="rgba(86,207,178,0.12)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="170" y="48" text-anchor="middle" fill="#56cfb2" font-size="11" font-weight="600" font-family="sans-serif">POST /shorten</text>
+          <line x1="170" y1="58" x2="170" y2="72" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowG)"/>
+          <rect x="100" y="75" width="140" height="30" rx="6" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="170" y="95" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">ID Generator</text>
+          <text x="245" y="95" fill="#8b90b8" font-size="9" font-family="sans-serif">(Snowflake)</text>
+          <line x1="170" y1="105" x2="170" y2="119" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowG)"/>
+          <rect x="100" y="122" width="140" height="30" rx="6" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="170" y="142" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Base62 Encode</text>
+          <text x="245" y="142" fill="#8b90b8" font-size="9" font-family="sans-serif">ID → "abc123"</text>
+          <line x1="170" y1="152" x2="170" y2="166" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowG)"/>
+          <rect x="100" y="169" width="140" height="30" rx="6" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="170" y="189" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Save to DB</text>
+          <line x1="170" y1="199" x2="170" y2="213" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowG)"/>
+          <rect x="100" y="216" width="140" height="30" rx="6" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="170" y="236" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Cache in Redis</text>
+          <line x1="170" y1="246" x2="170" y2="260" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowG)"/>
+          <rect x="95" y="263" width="150" height="34" rx="8" fill="rgba(86,207,178,0.15)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="170" y="285" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="700" font-family="sans-serif">Return Short URL</text>
+          <!-- Divider -->
+          <line x1="350" y1="15" x2="350" y2="320" stroke="#2e3250" stroke-width="1.5" stroke-dasharray="6,4"/>
+          <!-- READ PATH (right side) -->
+          <text x="530" y="18" text-anchor="middle" fill="#60a5fa" font-size="13" font-weight="800" font-family="sans-serif">READ PATH (Redirect)</text>
+          <rect x="460" y="28" width="140" height="30" rx="6" fill="rgba(96,165,250,0.12)" stroke="#60a5fa" stroke-width="1.5"/>
+          <text x="530" y="48" text-anchor="middle" fill="#60a5fa" font-size="11" font-weight="600" font-family="sans-serif">GET /abc123</text>
+          <line x1="530" y1="58" x2="530" y2="72" stroke="#60a5fa" stroke-width="1.5" marker-end="url(#arrowB)"/>
+          <rect x="460" y="75" width="140" height="30" rx="6" fill="#252840" stroke="#60a5fa" stroke-width="1"/>
+          <text x="530" y="95" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Check Redis Cache</text>
+          <!-- Branch: Hit or Miss -->
+          <line x1="530" y1="105" x2="530" y2="115" stroke="#60a5fa" stroke-width="1"/>
+          <!-- Hit path (left branch) -->
+          <line x1="530" y1="115" x2="440" y2="140" stroke="#56cfb2" stroke-width="1.5" marker-end="url(#arrowG)"/>
+          <rect x="380" y="140" width="120" height="28" rx="6" fill="rgba(86,207,178,0.1)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="440" y="159" text-anchor="middle" fill="#56cfb2" font-size="11" font-weight="700" font-family="sans-serif">CACHE HIT</text>
+          <!-- Miss path (right branch) -->
+          <line x1="530" y1="115" x2="620" y2="140" stroke="#f5a623" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <rect x="560" y="140" width="120" height="28" rx="6" fill="rgba(245,166,35,0.1)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="620" y="159" text-anchor="middle" fill="#f5a623" font-size="11" font-weight="700" font-family="sans-serif">CACHE MISS</text>
+          <line x1="620" y1="168" x2="620" y2="182" stroke="#f5a623" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <rect x="560" y="185" width="120" height="28" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1"/>
+          <text x="620" y="204" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Query DB</text>
+          <line x1="620" y1="213" x2="620" y2="227" stroke="#f5a623" stroke-width="1.5" marker-end="url(#arrowD)"/>
+          <rect x="560" y="230" width="120" height="28" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1"/>
+          <text x="620" y="249" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Update Cache</text>
+          <!-- Both converge -->
+          <line x1="440" y1="168" x2="440" y2="280" stroke="#56cfb2" stroke-width="1"/>
+          <line x1="620" y1="258" x2="620" y2="280" stroke="#f5a623" stroke-width="1"/>
+          <line x1="440" y1="280" x2="530" y2="290" stroke="#60a5fa" stroke-width="1.5"/>
+          <line x1="620" y1="280" x2="530" y2="290" stroke="#60a5fa" stroke-width="1.5"/>
+          <rect x="460" y="290" width="140" height="34" rx="8" fill="rgba(96,165,250,0.15)" stroke="#60a5fa" stroke-width="2"/>
+          <text x="530" y="312" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="700" font-family="sans-serif">301/302 Redirect</text>
+        </svg>
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Cache layer (Redis):</strong> Stores shortCode → longURL mappings. Cache hit = 0 DB queries = sub-millisecond redirect. Cache eviction: LRU (least recently used). Cache hit rate for popular URLs approaches 100%</li>
+        <li><strong>Database:</strong> NoSQL (e.g. Cassandra or DynamoDB) — no complex joins needed. Schema: <code>shortCode (PK), longUrl, userId, createdAt, expiresAt</code></li>
+        <li><strong>Write path:</strong> User sends long URL → generate ID → encode to Base62 → save to DB → cache it → return short URL</li>
+        <li><strong>Read path:</strong> Request for short code → check Redis → if miss, check DB → cache result → 301/302 redirect</li>
+        <li><strong>Scale:</strong> With 100M URLs/day stored for 5 years = 182.5B records = ~180TB of data. Use sharding by shortCode prefix</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="interview-section">
+        <div class="int-title">Interview Questions</div>
+        <div class="int-q">
+          <div class="int-q-item">
+            <div class="q-text">How would you handle custom short URLs (e.g. bit.ly/mycompany)?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Store custom aliases in the same table. Add a <code>isCustom</code> flag and validate that the alias contains only URL-safe characters. Check uniqueness before saving. Custom aliases should never be overwritten — return an error if the alias exists. Reserve certain words as system aliases (e.g. "api", "admin"). Rate limit custom alias creation per user to prevent squatting. A separate index on the alias column ensures fast lookups.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How would you implement link expiration?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Store an <code>expiresAt</code> timestamp in the DB. On each redirect request, check if <code>expiresAt</code> is in the past — if yes, return 410 Gone. For cleanup, run a background job (cron or Kafka consumer) that periodically scans for expired links and deletes them. Also add a Redis TTL to cached entries matching the expiration time — expired links auto-evict from cache. Don't rely solely on Redis TTL (cache might be cold after restart).</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How would you scale the URL shortener to handle 100K redirects per second?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Redis cache is the key — popular URLs get cached and serve redirects without touching the DB. Scale Redis horizontally with cluster mode. Add read replicas to the DB. Use CDN (CloudFront) to cache 301 redirects at edge nodes globally — the redirect itself never hits your servers for permanently cached URLs. Use connection pooling and async I/O on web servers. Scale web servers horizontally behind a load balancer. At 100K req/sec, the bottleneck is usually DB for cache misses — use read replicas and DB sharding.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">Why use NoSQL instead of a relational database?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">The URL shortener access pattern is simple: put(key, value) and get(key). No joins, no complex transactions, no aggregations. Relational databases shine for structured queries but add overhead for simple key-value lookups at massive scale. NoSQL (Cassandra, DynamoDB) provides horizontal scalability, automatic sharding, and high availability out of the box. The trade-off: no ACID transactions, no foreign key constraints — but we don't need them here. The primary concern is throughput and partition tolerance.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════ CHAPTER 9 ══════ -->
+<div class="chapter" id="ch9">
+  <div class="chapter-header">
+    <div class="ch-badge" style="background:color-mix(in srgb,var(--ch9) 15%,transparent);color:var(--ch9)">09</div>
+    <div class="ch-meta">
+      <h2 style="color:var(--ch9)">Design a Web Crawler</h2>
+      <div class="subtitle">BFS traversal · Politeness · URL Frontier · Deduplication</div>
+    </div>
+  </div>
+  <div class="chapter-body">
+
+    <div class="section">
+      <div class="section-title">What is a Web Crawler?</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — A Librarian Cataloging All Books</div>
+        Imagine a librarian who wants to catalog every book in existence. They start with a list of known books. For each book, they read it, catalog it, and note all books it references. Then they get those books, catalog them, note their references, and so on. The Web is the library. Pages are books. Links are references. The crawler is the librarian, doing a breadth-first search of infinite hyperlinked pages.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Search indexing:</strong> Google/Bing use crawlers to discover new pages for their search index</li>
+        <li><strong>Web archiving:</strong> Internet Archive's Wayback Machine crawls and stores historical snapshots</li>
+        <li><strong>Web mining:</strong> Extract prices from e-commerce sites, sentiment from news articles</li>
+        <li><strong>Link checking:</strong> Detect broken links on websites</li>
+        <li><strong>Scale at Google:</strong> ~15 billion web pages, re-crawl every few weeks. Must handle 100s of millions of URLs per day</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Key Properties a Good Crawler Must Have</div>
+      <ul class="notes">
+        <li><strong>Scalability:</strong> Web has 5+ billion pages. Must be distributed across many machines, resumable after crashes</li>
+        <li><strong>Robustness:</strong> Servers go down, pages timeout, HTML is malformed, infinite redirect loops. Crawler must handle all of these gracefully</li>
+        <li><strong>Politeness:</strong> Don't hammer a single website — wait between requests to the same domain. Respect <code>robots.txt</code> (a file websites use to tell crawlers what they can/can't access)</li>
+        <li><strong>Extensibility:</strong> Today you crawl HTML. Tomorrow you need to crawl PDFs, images, videos. Design for plug-in parsers</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Core Architecture — How it Works</div>
+      <div class="diagram-box">
+        <div class="diagram-label">Web Crawler — Full Architecture Loop</div>
+        <svg viewBox="0 0 720 400" width="100%" style="max-width:720px">
+          <defs>
+            <marker id="arrowP" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0,0 7,2.5 0,5" fill="#a78bfa"/></marker>
+            <marker id="arrowGr" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0,0 7,2.5 0,5" fill="#8b90b8"/></marker>
+          </defs>
+          <!-- Seed URLs -->
+          <rect x="10" y="30" width="100" height="35" rx="8" fill="rgba(167,139,250,0.2)" stroke="#a78bfa" stroke-width="2"/>
+          <text x="60" y="52" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="700" font-family="sans-serif">Seed URLs</text>
+          <line x1="115" y1="47" x2="145" y2="47" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+          <!-- URL Frontier -->
+          <rect x="150" y="20" width="120" height="55" rx="10" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="2.5"/>
+          <text x="210" y="42" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="800" font-family="sans-serif">URL Frontier</text>
+          <text x="210" y="58" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">(Priority + Politeness)</text>
+          <line x1="275" y1="47" x2="310" y2="47" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+          <!-- HTML Downloader -->
+          <rect x="315" y="22" width="130" height="50" rx="8" fill="#252840" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="380" y="43" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">HTML Downloader</text>
+          <text x="380" y="58" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">Fetch page content</text>
+          <!-- DNS Resolver (side) -->
+          <rect x="350" y="90" width="100" height="30" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="400" y="110" text-anchor="middle" fill="#f5a623" font-size="10" font-family="sans-serif">DNS Cache</text>
+          <line x1="400" y1="72" x2="400" y2="87" stroke="#f5a623" stroke-width="1" stroke-dasharray="4,3"/>
+          <!-- robots.txt (side) -->
+          <rect x="470" y="90" width="100" height="30" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="520" y="110" text-anchor="middle" fill="#f5a623" font-size="10" font-family="sans-serif">robots.txt</text>
+          <line x1="430" y1="72" x2="520" y2="87" stroke="#f5a623" stroke-width="1" stroke-dasharray="4,3"/>
+          <!-- Arrow down -->
+          <line x1="380" y1="72" x2="380" y2="140" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+          <!-- Content Parser -->
+          <rect x="315" y="145" width="130" height="40" rx="8" fill="#252840" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="380" y="170" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Content Parser</text>
+          <line x1="380" y1="185" x2="380" y2="210" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+          <!-- Content Seen? -->
+          <rect x="325" y="215" width="110" height="40" rx="20" fill="rgba(245,166,35,0.1)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="380" y="240" text-anchor="middle" fill="#f5a623" font-size="11" font-weight="600" font-family="sans-serif">Content Seen?</text>
+          <!-- Content DB (right side) -->
+          <rect x="510" y="218" width="100" height="34" rx="6" fill="#252840" stroke="#8b90b8" stroke-width="1"/>
+          <text x="560" y="240" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">Content DB</text>
+          <line x1="440" y1="225" x2="505" y2="225" stroke="#8b90b8" stroke-width="1" stroke-dasharray="4,3"/>
+          <text x="470" y="218" fill="#56cfb2" font-size="9" font-family="sans-serif">new</text>
+          <!-- Duplicate label -->
+          <text x="480" y="255" fill="#f56565" font-size="9" font-family="sans-serif">dup → skip</text>
+          <line x1="436" y1="245" x2="470" y2="250" stroke="#f56565" stroke-width="1"/>
+          <!-- Arrow down to Link Extractor -->
+          <line x1="380" y1="255" x2="380" y2="280" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+          <!-- Link Extractor -->
+          <rect x="315" y="285" width="130" height="40" rx="8" fill="#252840" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="380" y="310" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">Link Extractor</text>
+          <!-- Arrow left -->
+          <line x1="310" y1="305" x2="250" y2="305" stroke="#a78bfa" stroke-width="1.5"/>
+          <!-- URL Filter -->
+          <rect x="130" y="285" width="115" height="40" rx="8" fill="#252840" stroke="#a78bfa" stroke-width="1.5"/>
+          <text x="187" y="310" text-anchor="middle" fill="#e8eaf6" font-size="11" font-weight="600" font-family="sans-serif">URL Filter</text>
+          <!-- Arrow up -->
+          <line x1="187" y1="285" x2="187" y2="245" stroke="#a78bfa" stroke-width="1.5"/>
+          <!-- URL Seen? (Bloom Filter) -->
+          <rect x="130" y="200" width="115" height="42" rx="20" fill="rgba(245,166,35,0.1)" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="187" y="220" text-anchor="middle" fill="#f5a623" font-size="11" font-weight="600" font-family="sans-serif">URL Seen?</text>
+          <text x="187" y="234" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">(Bloom Filter)</text>
+          <!-- Loop arrow back to frontier -->
+          <line x1="187" y1="200" x2="187" y2="130" stroke="#a78bfa" stroke-width="1.5"/>
+          <line x1="187" y1="130" x2="210" y2="130" stroke="#a78bfa" stroke-width="1"/>
+          <line x1="210" y1="130" x2="210" y2="80" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrowP)"/>
+          <text x="215" y="110" fill="#a78bfa" font-size="9" font-weight="600" font-family="sans-serif">new URLs</text>
+          <!-- Dup skip label -->
+          <text x="70" y="218" fill="#f56565" font-size="9" font-family="sans-serif">already seen</text>
+          <text x="70" y="230" fill="#f56565" font-size="9" font-family="sans-serif">→ skip</text>
+          <line x1="126" y1="220" x2="100" y2="220" stroke="#f56565" stroke-width="1"/>
+          <!-- Legend -->
+          <rect x="520" y="150" width="180" height="50" rx="8" fill="rgba(167,139,250,0.06)" stroke="#2e3250" stroke-width="1"/>
+          <text x="610" y="168" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="700" font-family="sans-serif">The Loop</text>
+          <text x="610" y="183" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">Fetch → Parse → Extract → Filter</text>
+          <text x="610" y="195" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">→ Dedup → Frontier → repeat</text>
+        </svg>
+      </div>
+      <ul class="notes" style="margin-top:16px">
+        <li><strong>Seed URLs:</strong> Initial starting points — popular domains, sitemaps. Quality seeds = broader coverage faster</li>
+        <li><strong>URL Frontier:</strong> A queue (actually two levels — front queues for priority, back queues for politeness). This is the heart of the crawler — it decides which URL to fetch next</li>
+        <li><strong>HTML Downloader:</strong> Fetches pages. First checks <code>robots.txt</code> cache. Handles timeouts, 3xx redirects, gzip decompression</li>
+        <li><strong>DNS Resolver with cache:</strong> DNS lookups are slow (10–200ms). Cache domain → IP mappings with short TTL (~1 min). Saves huge time at scale</li>
+        <li><strong>Content Parser:</strong> Validates HTML structure. Avoids storing garbage (malformed pages, error pages, spam)</li>
+        <li><strong>Content Seen? (Deduplication):</strong> Hash the page body (SHA-256) and check if seen before. 30% of web pages are near-duplicates (mirrors, print versions)</li>
+        <li><strong>Link Extractor:</strong> Parses all <code>&lt;a href="..."&gt;</code> tags. Converts relative URLs (<code>/about</code>) to absolute (<code>https://example.com/about</code>)</li>
+        <li><strong>URL Filter:</strong> Skip: already-crawled, blacklisted domains, non-HTML content, URLs that are too long (spider trap indicator)</li>
+        <li><strong>URL Seen? (Bloom Filter):</strong> Probabilistic set membership check — "have we crawled this URL?" Bloom filter is memory-efficient: 1 billion URLs stored in ~1GB RAM vs. 50GB in a hash set</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">URL Frontier — The Scheduler of the Crawler</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Airport Priority Lane + Gate Assignment</div>
+        At an airport, first-class passengers (high-priority URLs like CNN.com) are processed first. But each airline gate (domain) has its own queue to avoid chaos — only one plane (request) departs each gate at a time, with spacing between departures. The URL Frontier is this two-level system.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>Front queues (Priority):</strong> Multiple queues with different priorities. A "prioritizer" assigns URLs to queues based on PageRank, update frequency, traffic. High-priority URLs are fetched first</li>
+        <li><strong>Back queues (Politeness):</strong> One queue per domain. A <em>back queue router</em> ensures all URLs for domain X go into queue X. Crawler workers pull from queues with a minimum delay between pulls from the same queue (e.g. 1 second)</li>
+        <li><strong>Why back queues?</strong> Without them, a crawler might hit example.com 1000 times/second — a DDoS attack against that website. One queue per domain limits it to 1 req/second</li>
+        <li><strong>Queue selector:</strong> Picks which back queue to pull from next. Round-robin among non-empty queues, but respects per-domain rate limits</li>
+        <li><strong>Storage:</strong> URL frontier can have hundreds of millions of URLs. Store most on disk, keep a small in-memory buffer of "ready to fetch" URLs for performance</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">URL Frontier — Two-Level Queue Design</div>
+        <svg viewBox="0 0 680 320" width="100%" style="max-width:680px">
+          <!-- FRONT QUEUES (Priority) -->
+          <text x="130" y="18" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="800" font-family="sans-serif">FRONT QUEUES (Priority)</text>
+          <rect x="20" y="28" width="220" height="120" rx="10" fill="rgba(167,139,250,0.06)" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6,3"/>
+          <!-- Queue 1 -->
+          <rect x="35" y="40" width="190" height="26" rx="5" fill="rgba(245,101,101,0.12)" stroke="#f56565" stroke-width="1"/>
+          <text x="130" y="58" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="sans-serif">Q1: HIGH PRIORITY</text>
+          <text x="240" y="58" fill="#8b90b8" font-size="8" font-family="sans-serif">CNN, BBC</text>
+          <!-- Queue 2 -->
+          <rect x="35" y="72" width="190" height="26" rx="5" fill="rgba(245,166,35,0.12)" stroke="#f5a623" stroke-width="1"/>
+          <text x="130" y="90" text-anchor="middle" fill="#f5a623" font-size="10" font-weight="700" font-family="sans-serif">Q2: MEDIUM</text>
+          <text x="240" y="90" fill="#8b90b8" font-size="8" font-family="sans-serif">Blogs, forums</text>
+          <!-- Queue 3 -->
+          <rect x="35" y="104" width="190" height="26" rx="5" fill="rgba(86,207,178,0.12)" stroke="#56cfb2" stroke-width="1"/>
+          <text x="130" y="122" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="sans-serif">Q3: LOW</text>
+          <text x="240" y="122" fill="#8b90b8" font-size="8" font-family="sans-serif">Deep pages</text>
+          <!-- Prioritizer label -->
+          <text x="130" y="162" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">Prioritizer assigns URLs</text>
+          <text x="130" y="173" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">based on PageRank, frequency</text>
+          <!-- Arrow from front to back -->
+          <line x1="245" y1="88" x2="295" y2="88" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrowP)"/>
+          <text x="270" y="80" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="700" font-family="sans-serif">route</text>
+          <!-- BACK QUEUE ROUTER -->
+          <rect x="300" y="60" width="75" height="56" rx="8" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="2"/>
+          <text x="337" y="82" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="700" font-family="sans-serif">Back Q</text>
+          <text x="337" y="95" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="700" font-family="sans-serif">Router</text>
+          <!-- Arrow to back queues -->
+          <line x1="380" y1="88" x2="410" y2="88" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowP)"/>
+          <!-- BACK QUEUES (Politeness) -->
+          <text x="530" y="18" text-anchor="middle" fill="#56cfb2" font-size="12" font-weight="800" font-family="sans-serif">BACK QUEUES (Politeness)</text>
+          <rect x="415" y="28" width="250" height="152" rx="10" fill="rgba(86,207,178,0.04)" stroke="#56cfb2" stroke-width="1.5" stroke-dasharray="6,3"/>
+          <!-- Domain queues -->
+          <rect x="430" y="40" width="220" height="26" rx="5" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="540" y="58" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="600" font-family="sans-serif">google.com</text>
+          <text x="456" y="58" fill="#8b90b8" font-size="8" font-family="sans-serif">1s delay</text>
+          <rect x="430" y="72" width="220" height="26" rx="5" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="540" y="90" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="600" font-family="sans-serif">wikipedia.org</text>
+          <text x="456" y="90" fill="#8b90b8" font-size="8" font-family="sans-serif">1s delay</text>
+          <rect x="430" y="104" width="220" height="26" rx="5" fill="#252840" stroke="#56cfb2" stroke-width="1"/>
+          <text x="540" y="122" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="600" font-family="sans-serif">github.com</text>
+          <text x="456" y="122" fill="#8b90b8" font-size="8" font-family="sans-serif">2s delay</text>
+          <text x="540" y="148" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">...</text>
+          <text x="540" y="165" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="sans-serif">One queue per domain = no DDoS</text>
+          <!-- Workers -->
+          <text x="540" y="205" text-anchor="middle" fill="#f5a623" font-size="11" font-weight="700" font-family="sans-serif">CRAWLER WORKERS</text>
+          <rect x="420" y="215" width="80" height="30" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="460" y="235" text-anchor="middle" fill="#f5a623" font-size="10" font-family="sans-serif">Worker 1</text>
+          <rect x="510" y="215" width="80" height="30" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="550" y="235" text-anchor="middle" fill="#f5a623" font-size="10" font-family="sans-serif">Worker 2</text>
+          <rect x="600" y="215" width="80" height="30" rx="6" fill="#252840" stroke="#f5a623" stroke-width="1.5"/>
+          <text x="640" y="235" text-anchor="middle" fill="#f5a623" font-size="10" font-family="sans-serif">Worker N</text>
+          <line x1="540" y1="180" x2="460" y2="212" stroke="#f5a623" stroke-width="1" marker-end="url(#arrowD)"/>
+          <line x1="540" y1="180" x2="550" y2="212" stroke="#f5a623" stroke-width="1" marker-end="url(#arrowD)"/>
+          <line x1="540" y1="180" x2="640" y2="212" stroke="#f5a623" stroke-width="1" marker-end="url(#arrowD)"/>
+          <!-- Key insight box -->
+          <rect x="30" y="210" width="360" height="80" rx="8" fill="rgba(245,101,101,0.06)" stroke="#f56565" stroke-width="1"/>
+          <text x="210" y="232" text-anchor="middle" fill="#f56565" font-size="11" font-weight="700" font-family="sans-serif">Why two levels?</text>
+          <text x="210" y="250" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">Front queues decide WHAT to crawl first (priority)</text>
+          <text x="210" y="266" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">Back queues decide HOW FAST to crawl each domain</text>
+          <text x="210" y="282" text-anchor="middle" fill="#8b90b8" font-size="10" font-family="sans-serif">(politeness — never DDoS a website)</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Robustness — Handling the Wild Web</div>
+      <ul class="notes">
+        <li><strong>Spider traps:</strong> Some sites generate infinite URLs (e.g. a calendar with infinite "next day" links: <code>/calendar/2024/01/01</code>, <code>/calendar/2024/01/02</code>...). Fixes: cap URL depth (max 10 hops), cap URL length (max 200 chars), track URL patterns and skip repeating patterns</li>
+        <li><strong>Data noise:</strong> Ads, spam, low-quality auto-generated content. Filter via heuristics: text/link ratio, domain reputation, content quality scores</li>
+        <li><strong>Crash recovery:</strong> Persist URL frontier state to disk periodically. On restart, resume from last checkpoint instead of starting over</li>
+        <li><strong>Timeout + retry:</strong> If a page doesn't respond in 30 seconds, mark as timeout. Retry with exponential backoff (1s, 2s, 4s, 8s...). After 5 failures, mark as unreachable</li>
+        <li><strong>Consistent hashing for distribution:</strong> Assign URLs to crawler workers by domain hash. All URLs for same domain → same worker → easier politeness management</li>
+      </ul>
+    </div>
+
+    <div class="section">
+      <div class="section-title">BFS vs DFS — Why Crawlers Use BFS</div>
+      <div class="analogy">
+        <div class="analogy-label">Analogy — Exploring a City vs. a Deep Cave</div>
+        BFS (Breadth-First Search) is like exploring a city block-by-block — you cover the whole neighborhood before venturing far. DFS (Depth-First Search) is like following one street as far as it goes before backtracking. For the web, BFS is better — it discovers popular, high-quality pages first (since they're heavily linked and thus close to seeds), rather than diving deep into obscure corners.
+      </div>
+      <ul class="notes" style="margin-top:12px">
+        <li><strong>BFS advantage:</strong> Discovers all pages at depth 1, then depth 2, etc. Links with many incoming links (popular pages) tend to have short paths from seeds → BFS finds important content first</li>
+        <li><strong>DFS problem:</strong> Could get lost in an infinite deep path (spam site linking to itself recursively) before crawling any other sites</li>
+        <li><strong>Priority BFS:</strong> Extend basic BFS with priority scores — high-PageRank URLs jump the queue. This is what real crawlers use</li>
+      </ul>
+      <div class="diagram-box" style="margin-top:14px">
+        <div class="diagram-label">BFS vs DFS — Crawl Order Comparison</div>
+        <svg viewBox="0 0 680 260" width="100%" style="max-width:680px">
+          <!-- BFS side -->
+          <text x="170" y="18" text-anchor="middle" fill="#56cfb2" font-size="13" font-weight="800" font-family="sans-serif">BFS (Breadth-First)</text>
+          <!-- Root -->
+          <circle cx="170" cy="50" r="18" fill="rgba(86,207,178,0.2)" stroke="#56cfb2" stroke-width="2"/>
+          <text x="170" y="54" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="sans-serif">Seed</text>
+          <!-- Depth 1 -->
+          <line x1="155" y1="66" x2="90" y2="95" stroke="#56cfb2" stroke-width="1.5"/>
+          <line x1="170" y1="68" x2="170" y2="95" stroke="#56cfb2" stroke-width="1.5"/>
+          <line x1="185" y1="66" x2="250" y2="95" stroke="#56cfb2" stroke-width="1.5"/>
+          <circle cx="90" cy="110" r="14" fill="rgba(86,207,178,0.15)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="90" y="114" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="monospace">1</text>
+          <circle cx="170" cy="110" r="14" fill="rgba(86,207,178,0.15)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="170" y="114" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="monospace">2</text>
+          <circle cx="250" cy="110" r="14" fill="rgba(86,207,178,0.15)" stroke="#56cfb2" stroke-width="1.5"/>
+          <text x="250" y="114" text-anchor="middle" fill="#56cfb2" font-size="10" font-weight="700" font-family="monospace">3</text>
+          <!-- Depth 2 -->
+          <line x1="82" y1="124" x2="55" y2="150" stroke="#8b90b8" stroke-width="1"/>
+          <line x1="98" y1="124" x2="125" y2="150" stroke="#8b90b8" stroke-width="1"/>
+          <line x1="162" y1="124" x2="145" y2="150" stroke="#8b90b8" stroke-width="1"/>
+          <line x1="178" y1="124" x2="195" y2="150" stroke="#8b90b8" stroke-width="1"/>
+          <line x1="242" y1="124" x2="225" y2="150" stroke="#8b90b8" stroke-width="1"/>
+          <line x1="258" y1="124" x2="285" y2="150" stroke="#8b90b8" stroke-width="1"/>
+          <circle cx="55" cy="162" r="11" fill="#252840" stroke="#8b90b8" stroke-width="1"/><text x="55" y="166" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">4</text>
+          <circle cx="125" cy="162" r="11" fill="#252840" stroke="#8b90b8" stroke-width="1"/><text x="125" y="166" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">5</text>
+          <circle cx="145" cy="162" r="11" fill="#252840" stroke="#8b90b8" stroke-width="1"/><text x="145" y="166" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">6</text>
+          <circle cx="195" cy="162" r="11" fill="#252840" stroke="#8b90b8" stroke-width="1"/><text x="195" y="166" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">7</text>
+          <circle cx="225" cy="162" r="11" fill="#252840" stroke="#8b90b8" stroke-width="1"/><text x="225" y="166" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">8</text>
+          <circle cx="285" cy="162" r="11" fill="#252840" stroke="#8b90b8" stroke-width="1"/><text x="285" y="166" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">9</text>
+          <!-- Depth labels -->
+          <text x="325" y="54" fill="#8b90b8" font-size="9" font-family="sans-serif">← Depth 0</text>
+          <text x="325" y="114" fill="#56cfb2" font-size="9" font-weight="600" font-family="sans-serif">← Depth 1 (all first!)</text>
+          <text x="325" y="166" fill="#8b90b8" font-size="9" font-family="sans-serif">← Depth 2 (then all these)</text>
+          <!-- BFS order -->
+          <rect x="40" y="195" width="275" height="28" rx="6" fill="rgba(86,207,178,0.08)" stroke="#56cfb2" stroke-width="1"/>
+          <text x="177" y="214" text-anchor="middle" fill="#56cfb2" font-size="11" font-weight="600" font-family="sans-serif">Order: Seed → 1 → 2 → 3 → 4 → 5 → ...</text>
+          <text x="177" y="240" text-anchor="middle" fill="#56cfb2" font-size="10" font-family="sans-serif">Covers all important pages before going deep</text>
+          <!-- Divider -->
+          <line x1="340" y1="10" x2="340" y2="255" stroke="#2e3250" stroke-width="1.5" stroke-dasharray="6,4"/>
+          <!-- DFS side -->
+          <text x="510" y="18" text-anchor="middle" fill="#f56565" font-size="13" font-weight="800" font-family="sans-serif">DFS (Depth-First)</text>
+          <!-- Root -->
+          <circle cx="510" cy="50" r="18" fill="rgba(245,101,101,0.2)" stroke="#f56565" stroke-width="2"/>
+          <text x="510" y="54" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="sans-serif">Seed</text>
+          <!-- Deep path (left) highlighted -->
+          <line x1="495" y1="66" x2="430" y2="95" stroke="#f56565" stroke-width="2.5"/>
+          <line x1="510" y1="68" x2="510" y2="95" stroke="#8b90b8" stroke-width="1" stroke-dasharray="3,3"/>
+          <line x1="525" y1="66" x2="590" y2="95" stroke="#8b90b8" stroke-width="1" stroke-dasharray="3,3"/>
+          <circle cx="430" cy="110" r="14" fill="rgba(245,101,101,0.2)" stroke="#f56565" stroke-width="2"/>
+          <text x="430" y="114" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">1</text>
+          <circle cx="510" cy="110" r="14" fill="#252840" stroke="#8b90b8" stroke-width="1" stroke-dasharray="3,3"/>
+          <text x="510" y="114" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">?</text>
+          <circle cx="590" cy="110" r="14" fill="#252840" stroke="#8b90b8" stroke-width="1" stroke-dasharray="3,3"/>
+          <text x="590" y="114" text-anchor="middle" fill="#8b90b8" font-size="9" font-family="monospace">?</text>
+          <!-- Deep path continues -->
+          <line x1="422" y1="124" x2="395" y2="150" stroke="#f56565" stroke-width="2.5"/>
+          <circle cx="395" cy="162" r="14" fill="rgba(245,101,101,0.2)" stroke="#f56565" stroke-width="2"/>
+          <text x="395" y="166" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">2</text>
+          <line x1="387" y1="176" x2="370" y2="200" stroke="#f56565" stroke-width="2.5"/>
+          <circle cx="370" cy="212" r="14" fill="rgba(245,101,101,0.2)" stroke="#f56565" stroke-width="2"/>
+          <text x="370" y="216" text-anchor="middle" fill="#f56565" font-size="10" font-weight="700" font-family="monospace">3</text>
+          <!-- Infinity label -->
+          <text x="370" y="245" text-anchor="middle" fill="#f56565" font-size="14" font-family="sans-serif">↓ ∞</text>
+          <!-- Problem callout -->
+          <rect x="440" y="180" width="220" height="55" rx="6" fill="rgba(245,101,101,0.08)" stroke="#f56565" stroke-width="1"/>
+          <text x="550" y="200" text-anchor="middle" fill="#f56565" font-size="11" font-weight="700" font-family="sans-serif">Goes deep into one site</text>
+          <text x="550" y="216" text-anchor="middle" fill="#f56565" font-size="10" font-family="sans-serif">Misses pages 2,3 (other sites)</text>
+          <text x="550" y="232" text-anchor="middle" fill="#f56565" font-size="10" font-family="sans-serif">Spider traps = infinite loop!</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="interview-section">
+        <div class="int-title">Interview Questions</div>
+        <div class="int-q">
+          <div class="int-q-item">
+            <div class="q-text">How do you handle duplicate content in a web crawler?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Two types of duplicates: (1) <strong>Duplicate URLs:</strong> Use a bloom filter (memory-efficient, fast) to check if a URL has been seen. Bloom filters can answer "definitely not seen" or "probably seen" with a very low false positive rate. Also maintain a persistent hash set for ground truth. (2) <strong>Duplicate content:</strong> Hash the page body (MD5/SHA-256). Store content hashes in a DB. If hash already exists, the page is a duplicate — don't store it again, just update the URL-to-content mapping. Near-duplicate detection uses simhash (locality-sensitive hashing) to detect pages that are 90%+ similar.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How does a web crawler respect robots.txt?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text"><code>robots.txt</code> is a file at <code>https://domain.com/robots.txt</code> that tells crawlers which paths they're allowed to visit. Example: <code>Disallow: /private/</code> means don't crawl anything under /private/. The crawler fetches and caches <code>robots.txt</code> for each domain (TTL ~1 day) before crawling any page on that domain. Before downloading any URL, check if it matches any Disallow rule. Also respect <code>Crawl-delay</code> directives (minimum seconds between requests). Ignoring robots.txt is technically legal in some jurisdictions but unethical and can get your IP banned.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How would you scale the crawler to crawl 1 billion pages per day?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">1B pages/day = ~11,600 pages/second. Each page takes ~100-500ms to fetch. So you need 1,160–5,800 concurrent download threads. Distribute across 100s of crawler servers. Use consistent hashing to assign domains to servers (one server handles all of google.com, another handles all of wikipedia.org — simplifies politeness). URL Frontier becomes a distributed queue (Kafka). Store content in distributed storage (HDFS or S3). Each crawler server runs a pool of async workers. Use distributed DNS caches. At this scale, network bandwidth (~1TB/day) and storage (100s of TB) become as important as computational resources.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">What is a spider trap and how do you detect/handle it?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">A spider trap is a set of web pages that cause a crawler to loop infinitely or generate an exponentially growing URL set. Example: <code>/calendar?date=2024-01-01</code> has "next day" links going forever. Detection: (1) Track URL depth from seed — reject URLs more than N hops deep. (2) Detect URL patterns — if a URL path keeps getting longer with repeating segments, skip it. (3) Track how many URLs a single domain has generated — cap per-domain URL count. (4) Length cap — URLs over 200 characters are suspicious. All these are heuristics; perfect detection is impossible, but a combination works well in practice.</div>
+          </div>
+          <div class="int-q-item">
+            <div class="q-text">How do you prioritize which URLs to crawl first?</div>
+            <div class="toggle-hint">Click to reveal answer</div>
+            <div class="a-text">Priority is a multi-factor score: (1) <strong>PageRank</strong> — pages with many incoming links are likely important. (2) <strong>Update frequency</strong> — news sites update every minute; a personal blog might update monthly. Crawl more frequently updated sites more often. (3) <strong>Traffic/popularity</strong> — Alexa rank, common crawl data. (4) <strong>Freshness</strong> — time since last successful crawl. (5) <strong>Domain importance</strong> — .gov, .edu, major news domains get higher baseline priority. These factors feed into a score, and URLs with higher scores sit in higher-priority front queues in the URL Frontier.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</main>
+
+<script>
+  // Intersection Observer for scroll-in animation
+  const chapters = document.querySelectorAll('.chapter');
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add('visible'); obs.unobserve(e.target); }
+    });
+  }, { threshold: 0.04 });
+  chapters.forEach(c => obs.observe(c));
+
+  // Smooth scroll
+  document.querySelectorAll('a[href^="#"]').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const el = document.querySelector(a.getAttribute('href'));
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
+  // Toggle interview Q&A
+  document.querySelectorAll('.int-q-item').forEach(item => {
+    item.addEventListener('click', () => {
+      item.classList.toggle('open');
+    });
+  });
+</script>
+</body>
+</html>

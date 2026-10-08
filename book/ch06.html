@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 6 - Design a Key-Value Store</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="6">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 6</div><h1>Design a Key-Value Store</h1>
+    <p class="lead">A key-value store is the simplest kind of database: you hand it a key, it hands you back a value. Making one that runs on a single computer is easy. Making one that runs on hundreds of computers, never goes down, and survives broken networks is one of the classic hard problems of system design, and this chapter walks through every piece of it.</p>
+    <div class="meta"><span class="tag">~45 min read</span><span class="tag">Advanced</span><span class="tag">Prerequisites: Ch 1 (scaling basics), Ch 5 (consistent hashing)</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>Almost every large website needs somewhere to keep small pieces of data that it can look up very quickly by a name. A shopping cart is looked up by a user ID. A login session is looked up by a session token. A user's settings are looked up by their account ID. In all of these cases the program does not need fancy search or joins. It just needs: "give me the thing stored under this name".</p>
+    <p>That is exactly what a <strong>key-value store</strong> does. Famous real-world examples are Amazon DynamoDB, memcached and Redis. The book's design in this chapter is heavily inspired by Amazon's Dynamo paper and by Apache Cassandra.</p>
+    <p>The interesting part is not the "store a value" part. It is everything that happens when you need so much data and so much traffic that one machine is not enough. Then you must answer questions like:</p>
+    <ul>
+      <li>Which machine holds which key?</li>
+      <li>How many copies of each key do we keep, and where?</li>
+      <li>If two copies disagree, which one is right?</li>
+      <li>How do we notice that a machine has died, and what do we do about it?</li>
+      <li>How do we write and read data on each machine efficiently?</li>
+    </ul>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Think of a huge coat-check service at a stadium. You hand over your coat (the <em>value</em>) and get a ticket number (the <em>key</em>). With one small desk and one attendant, it is simple. But with 80,000 fans, you need many desks. Now you need rules: ticket numbers 1 to 10,000 go to desk A, and so on (<em>partitioning</em>). In case a desk catches fire, you keep a photo of every coat at two other desks (<em>replication</em>). Desks constantly shout "I'm still open!" to each other so everyone knows which desks are alive (<em>failure detection</em>). If desk A is briefly closed, desk B temporarily holds coats meant for A and passes them back when A reopens (<em>hinted handoff</em>). This chapter is basically the rulebook for that coat-check service.</p>
+    </div>
+    <div class="callout key"><div class="callout-title">What you will learn</div>
+      <p>The CAP theorem, consistent hashing for partitioning, replication, quorum consensus (N, W, R), consistency models, vector clocks for conflict detection, gossip protocols, sloppy quorum and hinted handoff, Merkle trees, and the read/write path inside a single storage node (commit log, memtable, SSTables, Bloom filters).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Key-value pair</dt><dd>One record in the store: a unique <em>key</em> (the name) and the <em>value</em> (the data) attached to it. Example: key <code>user:42:cart</code>, value <code>["book","pen"]</code>.</dd>
+      <dt>Node / server</dt><dd>One computer in the cluster that stores part of the data. The book uses "node" and "server" interchangeably.</dd>
+      <dt>Cluster</dt><dd>A group of nodes working together so they look like one big system to the user.</dd>
+      <dt>Distributed system</dt><dd>A system whose parts run on several computers that talk over a network.</dd>
+      <dt>Partition (data)</dt><dd>Splitting the data into smaller pieces so each node only stores a slice. Also called sharding.</dd>
+      <dt>Network partition</dt><dd>A different meaning: the network breaks so that some nodes cannot talk to others, even though they are all still running. The "P" in CAP.</dd>
+      <dt>Replication / replica</dt><dd>Keeping several copies of the same data on different nodes. Each copy is a replica.</dd>
+      <dt>Consistency</dt><dd>Everyone who reads the data sees the same, latest value, no matter which node they ask.</dd>
+      <dt>Availability</dt><dd>Every request gets a response, even if some nodes are broken.</dd>
+      <dt>Partition tolerance</dt><dd>The system keeps working even when the network splits the nodes into groups that cannot communicate.</dd>
+      <dt>CAP theorem</dt><dd>The rule that a distributed system cannot guarantee Consistency, Availability and Partition tolerance all at the same time. It can pick two.</dd>
+      <dt>Consistent hashing</dt><dd>A way to map keys and servers onto a circle ("hash ring") so that adding or removing a server only moves a small fraction of keys. Covered in Chapter 5.</dd>
+      <dt>Virtual node</dt><dd>One physical server appearing at several spots on the hash ring. More powerful servers get more virtual nodes.</dd>
+      <dt>Coordinator</dt><dd>The node that receives a client's request and acts as a middleman, forwarding it to the replicas and collecting their answers.</dd>
+      <dt>Quorum</dt><dd>The minimum number of replicas that must agree (acknowledge) before an operation is considered successful.</dd>
+      <dt>N, W, R</dt><dd>N = number of replicas. W = how many must confirm a write. R = how many must answer a read.</dd>
+      <dt>Strong / weak / eventual consistency</dt><dd>How fresh reads are guaranteed to be: always latest / maybe not latest / latest after enough time passes.</dd>
+      <dt>Versioning</dt><dd>Treating each change as a new, immutable version of the data instead of overwriting it.</dd>
+      <dt>Vector clock</dt><dd>A list of <code>[server, counter]</code> pairs attached to each version, used to tell whether one version came after another or whether they conflict.</dd>
+      <dt>Sibling / conflict</dt><dd>Two versions that were created independently (neither came from the other). The system cannot automatically pick one.</dd>
+      <dt>Heartbeat</dt><dd>A small "I'm alive" signal a node sends regularly.</dd>
+      <dt>Gossip protocol</dt><dd>A failure-detection method where each node periodically shares its list of heartbeats with a few random nodes, so information spreads like gossip.</dd>
+      <dt>Sloppy quorum</dt><dd>When some replicas are down, use the first W (or R) <em>healthy</em> servers on the ring instead of insisting on the exact replicas.</dd>
+      <dt>Hinted handoff</dt><dd>A stand-in server stores writes for a down server along with a "hint", then hands them back when that server recovers.</dd>
+      <dt>Anti-entropy</dt><dd>A background process that compares replicas and repairs any differences. "Entropy" here means disorder.</dd>
+      <dt>Merkle tree</dt><dd>A tree of hashes where each parent is the hash of its children. Lets two servers find which data differs by comparing only a few hashes.</dd>
+      <dt>Hash</dt><dd>A function that turns any input into a fixed-size fingerprint. Same input, same fingerprint; tiny change, totally different fingerprint.</dd>
+      <dt>Commit log</dt><dd>An append-only file on disk where every write is recorded first, so it can be recovered after a crash.</dd>
+      <dt>Memory cache / memtable</dt><dd>An in-memory table holding recent writes before they are flushed to disk.</dd>
+      <dt>SSTable</dt><dd>Sorted String Table: an immutable file on disk containing key-value pairs sorted by key.</dd>
+      <dt>Bloom filter</dt><dd>A tiny data structure that can answer "is this key <em>definitely not</em> here, or <em>possibly</em> here?" very quickly.</dd>
+      <dt>Latency</dt><dd>How long one request takes, usually measured in milliseconds.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="what-is-a-kv-store">What is a key-value store?</h2>
+    <p>A key-value store (also called a key-value database) is a non-relational database. "Non-relational" means there are no tables with columns, no SQL joins, no foreign keys. Each record is just a unique key and the value that goes with it.</p>
+    <ul>
+      <li>The <strong>key</strong> must be unique. It can be plain text or a hashed value. Examples from the book: plain text key <code>"last_logged_in_at"</code>, hashed key <code>253DDEC4</code>.</li>
+      <li>Short keys work better because they are faster to compare and take less space.</li>
+      <li>The <strong>value</strong> can be anything: a string, a list, an object. The store usually treats it as an opaque blob, meaning it does not care what is inside.</li>
+    </ul>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>key</th><th>value</th></tr>
+      <tr><td><code>145</code></td><td><code>john</code></td></tr>
+      <tr><td><code>147</code></td><td><code>bob</code></td></tr>
+      <tr><td><code>160</code></td><td><code>julia</code></td></tr>
+    </table></div>
+    <p>The whole interface is just two operations:</p>
+<pre><code>put(key, value)   // insert "value" associated with "key"
+get(key)          // get the "value" associated with "key"</code></pre>
+    <div class="callout info"><div class="callout-title">Why not just use a normal SQL database?</div>
+      <p>A relational database can do much more (joins, complex queries, transactions), but that power costs speed and makes it harder to spread across many machines. When all you need is "look up by key", a key-value store is simpler, faster, and much easier to scale horizontally (by adding more machines).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="design-scope">Understand the problem and design scope</h2>
+    <p>No design is perfect. Every design balances trade-offs between how much memory you use, how fresh reads are, how available the system is, and how fast it responds. So the first step in an interview is to agree on the requirements. The book settles on these characteristics:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Small pairs</h4><p>The size of a key-value pair is small: less than 10 KB.</p></div>
+      <div class="card purple"><h4>Big data</h4><p>It must be able to store a lot of data, far more than fits on one machine.</p></div>
+      <div class="card green"><h4>High availability</h4><p>The system responds quickly, even during failures.</p></div>
+      <div class="card teal"><h4>High scalability</h4><p>It can grow to support very large data sets and traffic.</p></div>
+      <div class="card yellow"><h4>Automatic scaling</h4><p>Servers can be added or removed automatically based on traffic.</p></div>
+      <div class="card pink"><h4>Tunable consistency</h4><p>The operator can choose how strict consistency should be, trading it against speed.</p></div>
+      <div class="card red"><h4>Low latency</h4><p>Reads and writes must be fast.</p></div>
+    </div>
+    <div class="callout tip"><div class="callout-title">Interview tip</div>
+      <p>Always say these requirements out loud and get the interviewer to agree. "Tunable consistency" in particular is the hook for the whole quorum discussion later. If the interviewer instead says "this is for bank balances", you would lean towards strong consistency, and the design changes.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="single-server">Single server key-value store</h2>
+    <p>Before going distributed, start simple. On one server, the most intuitive approach is to keep everything in a <strong>hash table</strong> in memory.</p>
+    <p>A hash table is a data structure that stores key-value pairs and can find any key in roughly constant time, no matter how many keys there are. It works by running the key through a hash function to compute which "bucket" (slot in an array) the value lives in. Memory (RAM) is extremely fast, so this gives very low latency.</p>
+    <div class="diagram"><div class="diagram-title">Single-server key-value store</div>
+      <div class="flow">
+        <div class="node accent">Client<small>put / get</small></div>
+        <div class="arrow">→<small>key</small></div>
+        <div class="node yellow">hash(key)<small>pick bucket</small></div>
+        <div class="arrow">→</div>
+        <div class="node db green">In-memory hash table<small>bucket 0..n</small></div>
+      </div>
+      <div class="diagram-caption">The whole store is one hash table in RAM on one machine. Fast, but limited by how much RAM one machine has.</div>
+    </div>
+    <p><strong>The problem:</strong> memory is limited and expensive. Once the data grows past what fits in RAM, you are stuck. The book suggests two optimizations to stretch one server further:</p>
+    <ol class="steps">
+      <li><strong>Data compression.</strong> Compress values so they take less space. You trade a little CPU time for more storage.</li>
+      <li><strong>Keep only hot data in memory.</strong> "Hot" means frequently accessed. Store the rest on disk. Most systems have a small set of popular keys, so this works well.</li>
+    </ol>
+    <p>Even with these tricks, a single server reaches its capacity very quickly, and if that one server dies, everything is gone or unavailable. To support big data and high availability, we need a <strong>distributed</strong> key-value store.</p>
+  </section>
+
+  <section>
+    <h2 id="distributed-kv">Distributed key-value store</h2>
+    <p>A distributed key-value store (also called a <em>distributed hash table</em>) spreads key-value pairs across many servers. As soon as you have more than one server, a new problem appears: the servers must communicate over a network, and networks can fail. The rules for what you can and cannot guarantee in that situation are captured by the <strong>CAP theorem</strong>. It is the single most important idea for this chapter, so we will go slowly.</p>
+  </section>
+
+  <section>
+    <h2 id="cap-theorem">The CAP theorem, explained slowly</h2>
+    <p>The CAP theorem says it is impossible for a distributed system to <em>simultaneously</em> provide more than two of these three guarantees:</p>
+    <div class="cards">
+      <div class="card sky"><h4>C - Consistency</h4><p>All clients see the same data at the same time, no matter which node they connect to.</p></div>
+      <div class="card green"><h4>A - Availability</h4><p>Any client that requests data gets a response, even if some of the nodes are down.</p></div>
+      <div class="card pink"><h4>P - Partition tolerance</h4><p>The system keeps operating even when the network breaks communication between nodes.</p></div>
+    </div>
+    <p>A "partition" here means a communication break between two nodes. Partition tolerance means the system continues to work despite such breaks.</p>
+
+    <div class="diagram"><div class="diagram-title">Three replicas: n1, n2, n3</div>
+      <svg class="dg" viewBox="0 0 600 300">
+        <line x1="300" y1="70" x2="160" y2="230"/>
+        <line x1="300" y1="70" x2="440" y2="230"/>
+        <line x1="160" y1="230" x2="440" y2="230"/>
+        <circle cx="300" cy="70" r="36" class="s"/><text x="300" y="75" text-anchor="middle">n1</text>
+        <circle cx="160" cy="230" r="36" class="s"/><text x="160" y="235" text-anchor="middle">n2</text>
+        <circle cx="440" cy="230" r="36" class="s"/><text x="440" y="235" text-anchor="middle">n3</text>
+        <text x="300" y="20" text-anchor="middle" class="sm">each node holds a copy of the same data</text>
+        <text x="300" y="255" text-anchor="middle" class="sm">network link</text>
+        <text x="200" y="140" text-anchor="middle" class="sm">link</text>
+        <text x="400" y="140" text-anchor="middle" class="sm">link</text>
+      </svg>
+      <div class="diagram-caption">Data is replicated on three nodes. In a healthy network, a write to any node is copied to the other two, so all three agree.</div>
+    </div>
+
+    <h3>Picking two out of three</h3>
+    <p>Key-value stores are classified by which two of the three properties they support:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Type</th><th>Guarantees</th><th>Gives up</th><th>Typical example</th></tr>
+      <tr><td><strong>CP</strong></td><td>Consistency + Partition tolerance</td><td>Availability</td><td>Bank balances, anything where a wrong answer is worse than no answer</td></tr>
+      <tr><td><strong>AP</strong></td><td>Availability + Partition tolerance</td><td>Consistency (reads may be stale)</td><td>Shopping carts, social feeds, the Dynamo/Cassandra style</td></tr>
+      <tr><td><strong>CA</strong></td><td>Consistency + Availability</td><td>Partition tolerance</td><td>Does not exist in real-world distributed systems</td></tr>
+    </table></div>
+
+    <div class="callout warn"><div class="callout-title">Why CA cannot exist in practice</div>
+      <p>Network failures are unavoidable. Cables get cut, switches crash, a data center loses connectivity. A distributed system therefore <em>must</em> tolerate network partitions; it has no choice. Since P is mandatory, the only real choice is what to do <em>when</em> a partition happens: keep consistency (CP) or keep availability (AP). A "CA" system would be one that simply assumes the network never breaks, which is not realistic once you have more than one machine.</p>
+    </div>
+
+    <h3>The ideal world</h3>
+    <p>In an ideal world, network partitions never occur. Data written to n1 is automatically replicated to n2 and n3, and both consistency and availability are achieved. Nothing to choose.</p>
+
+    <h3>The real world: n3 goes down</h3>
+    <p>Now suppose n3 goes down (or the network to it breaks) and cannot communicate with n1 and n2.</p>
+    <div class="diagram"><div class="diagram-title">Network partition: n3 is cut off</div>
+      <svg class="dg" viewBox="0 0 600 310">
+        <line x1="300" y1="70" x2="160" y2="230" class="g"/>
+        <line x1="300" y1="70" x2="440" y2="230" class="r" stroke-dasharray="6 5"/>
+        <line x1="160" y1="230" x2="440" y2="230" class="r" stroke-dasharray="6 5"/>
+        <circle cx="300" cy="70" r="36" class="g"/><text x="300" y="75" text-anchor="middle">n1</text>
+        <circle cx="160" cy="230" r="36" class="g"/><text x="160" y="235" text-anchor="middle">n2</text>
+        <circle cx="440" cy="230" r="36" class="r"/><text x="440" y="235" text-anchor="middle">n3</text>
+        <text x="381" y="154" text-anchor="middle" class="r">X</text>
+        <text x="300" y="236" text-anchor="middle" class="r">X</text>
+        <text x="300" y="20" text-anchor="middle" class="sm">writes to n1/n2 cannot reach n3</text>
+        <text x="440" y="290" text-anchor="middle" class="sm">n3 may hold stale data</text>
+        <text x="160" y="290" text-anchor="middle" class="sm">n1 and n2 still talk</text>
+      </svg>
+      <div class="diagram-caption">If clients write to n1 or n2, the data cannot be propagated to n3. If data was written to n3 but not yet copied out, n1 and n2 have stale data. The system must now choose.</div>
+    </div>
+
+    <div class="cards">
+      <div class="card sky"><h4>If we choose CP (consistency)</h4><p>We must <strong>block all write operations</strong> to n1 and n2 to avoid data inconsistency among the three servers. This makes the system unavailable. Banks typically choose this: if a balance is not up to date, showing it could lead to wrong transactions. Until the partition is resolved, the bank returns an error rather than a possibly wrong answer.</p></div>
+      <div class="card green"><h4>If we choose AP (availability)</h4><p>The system <strong>keeps accepting reads</strong>, even though it might return stale data. n1 and n2 <strong>keep accepting writes</strong>, and the data is <strong>synced to n3 when the partition is resolved</strong>. Users always get a response; they just might briefly see old data.</p></div>
+    </div>
+
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Imagine three bank branches that share one ledger by phone. The phone lines to branch 3 go dead. A <strong>CP</strong> bank says "Sorry, no withdrawals until the phones work again" because branch 3 might have just paid out the same money. An <strong>AP</strong> coffee-shop loyalty program says "Sure, here's your stamp" at every branch and reconciles the stamp cards later. Being briefly wrong about loyalty stamps is fine; being wrong about money is not.</p>
+    </div>
+    <p>Choosing the right CAP guarantee for your use case is an important step. Discuss it with the interviewer and design accordingly. For the rest of this chapter, the book's design leans towards an <strong>AP</strong> system with tunable consistency, like Dynamo and Cassandra.</p>
+  </section>
+
+  <section>
+    <h2 id="system-components">System components overview</h2>
+    <p>The book builds the distributed key-value store out of these core components and techniques. Each gets its own section below:</p>
+    <ol class="steps">
+      <li><strong>Data partition</strong> - which server holds which key</li>
+      <li><strong>Data replication</strong> - keeping copies on several servers</li>
+      <li><strong>Consistency</strong> - quorum consensus and consistency models</li>
+      <li><strong>Inconsistency resolution</strong> - versioning and vector clocks</li>
+      <li><strong>Handling failures</strong> - detecting, temporary, permanent, data center outages</li>
+      <li><strong>System architecture diagram</strong> - how the pieces fit</li>
+      <li><strong>Write path</strong> and <strong>read path</strong> - what happens inside one node</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="data-partition">Data partition</h2>
+    <p>For large applications it is infeasible to fit the complete data set on one server. The simplest fix is to split the data into smaller partitions and store them on multiple servers. Two challenges come up:</p>
+    <ul>
+      <li><strong>Distribute data evenly</strong> across multiple servers, so no single server is overloaded.</li>
+      <li><strong>Minimize data movement</strong> when nodes are added or removed.</li>
+    </ul>
+    <p><strong>Consistent hashing</strong> (Chapter 5) solves both. A quick refresher:</p>
+    <ol class="steps">
+      <li><strong>Make a ring.</strong> Imagine the whole range of possible hash values bent into a circle.</li>
+      <li><strong>Place servers on the ring.</strong> Hash each server's name or IP to get its position.</li>
+      <li><strong>Place keys on the ring.</strong> Hash each key to get its position.</li>
+      <li><strong>Walk clockwise.</strong> A key belongs to the first server you meet walking clockwise from the key's position.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Consistent hashing ring with 8 servers</div>
+      <svg class="dg" viewBox="0 0 600 400">
+        <defs><marker id="c6-arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <circle cx="300" cy="200" r="140" style="fill:none"/>
+        <circle cx="300" cy="60" r="18" class="s"/><text x="300" y="65" text-anchor="middle">s0</text>
+        <circle cx="399" cy="101" r="18" class="s"/><text x="399" y="106" text-anchor="middle">s1</text>
+        <circle cx="440" cy="200" r="18" class="s"/><text x="440" y="205" text-anchor="middle">s2</text>
+        <circle cx="399" cy="299" r="18" class="s"/><text x="399" y="304" text-anchor="middle">s3</text>
+        <circle cx="300" cy="340" r="18" class="s"/><text x="300" y="345" text-anchor="middle">s4</text>
+        <circle cx="201" cy="299" r="18" class="s"/><text x="201" y="304" text-anchor="middle">s5</text>
+        <circle cx="160" cy="200" r="18" class="s"/><text x="160" y="205" text-anchor="middle">s6</text>
+        <circle cx="201" cy="101" r="18" class="s"/><text x="201" y="106" text-anchor="middle">s7</text>
+        <circle cx="354" cy="71" r="7" class="fill-y"/>
+        <text x="370" y="40" text-anchor="middle" class="y">key0</text>
+        <path d="M 362 76 Q 378 82 384 90" class="y" marker-end="url(#c6-arr1)"/>
+        <text x="300" y="195" text-anchor="middle">hash ring</text>
+        <text x="300" y="215" text-anchor="middle" class="sm">walk clockwise from the key</text>
+        <text x="300" y="232" text-anchor="middle" class="sm">key0 is stored on s1</text>
+      </svg>
+      <div class="diagram-caption">Eight servers (s0 to s7) are placed on the ring by hashing. key0 hashes to a point between s0 and s1; walking clockwise, the first server reached is s1, so s1 stores key0.</div>
+    </div>
+    <p>Using consistent hashing to partition data has two big advantages called out by the book:</p>
+    <div class="cards">
+      <div class="card green"><h4>Automatic scaling</h4><p>Servers can be added and removed automatically depending on load. When a server joins, it only takes over keys from its clockwise neighbour; the rest of the ring is untouched. So only a small fraction of keys move.</p></div>
+      <div class="card purple"><h4>Heterogeneity</h4><p>The number of virtual nodes for a server is proportional to its capacity. A server with twice the disk and CPU gets twice as many virtual nodes, so it receives roughly twice as many keys.</p></div>
+    </div>
+    <div class="callout info"><div class="callout-title">Why not just hash(key) mod number_of_servers?</div>
+      <p>With modulo hashing, if you go from 4 servers to 5, almost every key maps to a different server and has to move. That is a disaster for a store holding terabytes. Consistent hashing moves only about 1/n of the keys.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="data-replication">Data replication</h2>
+    <p>To achieve high availability and reliability, data must be replicated asynchronously over <strong>N</strong> servers, where N is a configurable parameter (3 is a very common choice).</p>
+    <p><strong>How replicas are chosen:</strong> after a key is mapped to a position on the hash ring, walk clockwise from that position and choose the <strong>first N servers</strong> on the ring to store copies.</p>
+    <div class="diagram"><div class="diagram-title">Replicating key0 with N = 3</div>
+      <svg class="dg" viewBox="0 0 600 400">
+        <defs><marker id="c6-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <circle cx="300" cy="200" r="140" style="fill:none"/>
+        <circle cx="300" cy="60" r="18" class="s"/><text x="300" y="65" text-anchor="middle">s0</text>
+        <circle cx="399" cy="101" r="20" class="g"/><text x="399" y="106" text-anchor="middle" class="g">s1</text>
+        <circle cx="440" cy="200" r="20" class="g"/><text x="440" y="205" text-anchor="middle" class="g">s2</text>
+        <circle cx="399" cy="299" r="20" class="g"/><text x="399" y="304" text-anchor="middle" class="g">s3</text>
+        <circle cx="300" cy="340" r="18" class="s"/><text x="300" y="345" text-anchor="middle">s4</text>
+        <circle cx="201" cy="299" r="18" class="s"/><text x="201" y="304" text-anchor="middle">s5</text>
+        <circle cx="160" cy="200" r="18" class="s"/><text x="160" y="205" text-anchor="middle">s6</text>
+        <circle cx="201" cy="101" r="18" class="s"/><text x="201" y="106" text-anchor="middle">s7</text>
+        <circle cx="354" cy="71" r="7" class="fill-y"/>
+        <text x="340" y="40" text-anchor="middle" class="y">key0</text>
+        <path d="M 425 118 Q 445 150 444 172" class="g" marker-end="url(#c6-arr2)"/>
+        <path d="M 444 228 Q 440 255 422 280" class="g" marker-end="url(#c6-arr2)"/>
+        <text x="490" y="95" text-anchor="middle" class="g">1st copy</text>
+        <text x="505" y="205" text-anchor="middle" class="g">2nd copy</text>
+        <text x="470" y="320" text-anchor="middle" class="g">3rd copy</text>
+        <text x="300" y="195" text-anchor="middle">N = 3</text>
+        <text x="300" y="215" text-anchor="middle" class="sm">key0 lives on s1, s2, s3</text>
+      </svg>
+      <div class="diagram-caption">Walking clockwise from key0, the first three servers are s1, s2 and s3. Each of them stores a replica of key0.</div>
+    </div>
+    <h3>Two important refinements</h3>
+    <ol class="steps">
+      <li><strong>Pick unique physical servers.</strong> With virtual nodes, the first N nodes on the ring might belong to fewer than N physical machines (for example, two virtual nodes of the same server sit next to each other). Then losing one machine loses two "copies". To avoid this, when walking clockwise we <strong>only choose unique servers</strong>, skipping virtual nodes of a server we already picked.</li>
+      <li><strong>Spread across data centers.</strong> Nodes in the same data center often fail at the same time due to power outages, network issues or natural disasters. For better reliability, replicas are placed in <strong>distinct data centers</strong>, and data centers are connected through high-speed networks.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Replicas across data centers</div>
+      <div class="flow">
+        <div class="group"><span class="group-label">Data center A</span><div class="node db green">s1<small>replica 1</small></div></div>
+        <div class="arrow">↔<small>fast link</small></div>
+        <div class="group"><span class="group-label">Data center B</span><div class="node db green">s2<small>replica 2</small></div></div>
+        <div class="arrow">↔<small>fast link</small></div>
+        <div class="group"><span class="group-label">Data center C</span><div class="node db green">s3<small>replica 3</small></div></div>
+      </div>
+      <div class="diagram-caption">If a flood takes out data center A, key0 still lives in B and C.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="consistency-quorum">Consistency: quorum consensus</h2>
+    <p>Since data is replicated on multiple nodes, it must be synchronized across replicas. If one replica has a new value and another still has the old one, a reader might see the wrong thing. <strong>Quorum consensus</strong> lets us guarantee consistency for both reads and writes, and lets us tune how strict we want to be.</p>
+    <h3>The three knobs</h3>
+    <div class="stats">
+      <div class="stat"><b>N</b><span>number of replicas</span></div>
+      <div class="stat"><b>W</b><span>write quorum: acks needed for a write to succeed</span></div>
+      <div class="stat"><b>R</b><span>read quorum: responses needed for a read to succeed</span></div>
+    </div>
+    <ul>
+      <li><strong>W</strong> of size W: for a write to be considered successful, it must be acknowledged by W replicas.</li>
+      <li><strong>R</strong> of size R: for a read to be considered successful, the read must wait for responses from at least R replicas.</li>
+    </ul>
+    <h3>The coordinator</h3>
+    <p>The client does not talk to all replicas itself. Instead, one node acts as the <strong>coordinator</strong>: a proxy between the client and the replica nodes. It forwards the request and counts the replies.</p>
+    <div class="diagram"><div class="diagram-title">Quorum write with N = 3</div>
+      <svg class="dg" viewBox="0 0 600 290">
+        <defs><marker id="c6-arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="30" y="30" width="110" height="50" rx="8" class="a"/><text x="85" y="60" text-anchor="middle">Client</text>
+        <rect x="230" y="30" width="140" height="50" rx="8" class="y"/><text x="300" y="60" text-anchor="middle">Coordinator</text>
+        <line x1="140" y1="55" x2="226" y2="55" marker-start="url(#c6-arr3)" marker-end="url(#c6-arr3)"/>
+        <text x="185" y="22" text-anchor="middle" class="sm">put / success</text>
+        <line x1="290" y1="82" x2="140" y2="204" marker-start="url(#c6-arr3)" marker-end="url(#c6-arr3)"/>
+        <line x1="300" y1="82" x2="300" y2="198" marker-start="url(#c6-arr3)" marker-end="url(#c6-arr3)"/>
+        <line x1="310" y1="82" x2="460" y2="204" marker-start="url(#c6-arr3)" marker-end="url(#c6-arr3)"/>
+        <text x="200" y="135" text-anchor="end" class="sm">put(key0, v1) / ack</text>
+        <text x="308" y="150" text-anchor="start" class="sm">put / ack</text>
+        <text x="400" y="135" text-anchor="start" class="sm">put / ack</text>
+        <circle cx="120" cy="230" r="30" class="g"/><text x="120" y="235" text-anchor="middle">s0</text>
+        <circle cx="300" cy="230" r="30" class="g"/><text x="300" y="235" text-anchor="middle">s1</text>
+        <circle cx="480" cy="230" r="30" class="g"/><text x="480" y="235" text-anchor="middle">s2</text>
+        <text x="300" y="282" text-anchor="middle" class="sm">replicas of key0</text>
+      </svg>
+      <div class="diagram-caption">The coordinator sends the write to all N = 3 replicas in parallel. With W = 1, it reports success to the client as soon as the first ack comes back. With W = 2 it waits for two acks; with W = 3, all three.</div>
+    </div>
+    <h3>Walking through W = 1</h3>
+    <ol class="steps">
+      <li><strong>Client sends</strong> <code>put(key0, v1)</code> to the coordinator.</li>
+      <li><strong>Coordinator forwards</strong> the write to s0, s1 and s2 at the same time.</li>
+      <li><strong>First ack arrives</strong>, say from s1. Because W = 1, one ack is enough.</li>
+      <li><strong>Coordinator replies</strong> "success" to the client immediately. It does <em>not</em> wait for s0 and s2.</li>
+      <li><strong>Data is still sent</strong> to s0 and s2 in the background. W = 1 does <em>not</em> mean the data is written to only one server; it means the coordinator only waits for one acknowledgment.</li>
+    </ol>
+    <div class="callout key"><div class="callout-title">The core trade-off</div>
+      <p>The configuration of W, R and N is a trade-off between <strong>latency</strong> and <strong>consistency</strong>. If W = 1 or R = 1, an operation returns quickly because the coordinator only waits for the fastest replica. If W or R is larger than 1, the system offers better consistency, but the query is slower because the coordinator must wait for the slowest of the required replicas.</p>
+    </div>
+    <h3>Why W + R &gt; N guarantees strong consistency</h3>
+    <p>If <strong>W + R &gt; N</strong>, strong consistency is guaranteed because there must be at least one overlapping node that has the latest data. Concretely, with N = 3, W = 2, R = 2:</p>
+    <div class="diagram"><div class="diagram-title">Overlap between write set and read set (N=3, W=2, R=2)</div>
+      <svg class="dg" viewBox="0 0 600 200">
+        <rect x="40" y="40" width="330" height="110" rx="14" class="g" style="fill:none" stroke-dasharray="6 4"/>
+        <rect x="230" y="55" width="330" height="110" rx="14" class="s" style="fill:none" stroke-dasharray="6 4"/>
+        <text x="120" y="32" text-anchor="middle" class="g">write went to (W=2)</text>
+        <text x="480" y="188" text-anchor="middle" class="s">read asks (R=2)</text>
+        <circle cx="130" cy="100" r="30"/><text x="130" y="105" text-anchor="middle">s0</text>
+        <circle cx="300" cy="105" r="30" class="y"/><text x="300" y="110" text-anchor="middle" class="y">s1</text>
+        <circle cx="470" cy="110" r="30"/><text x="470" y="115" text-anchor="middle">s2</text>
+        <text x="180" y="188" text-anchor="middle" class="sm">s1 is in both sets, so it has the latest value</text>
+      </svg>
+      <div class="diagram-caption">The write was confirmed by s0 and s1. A later read asks s1 and s2. Because 2 + 2 &gt; 3, the two groups must share at least one node (s1), so the read is guaranteed to see the latest write. (Versioning, below, tells the reader which of the answers is newer.)</div>
+    </div>
+    <h3>Possible configurations</h3>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Setting</th><th>What it means</th><th>Good for</th></tr>
+      <tr><td><code>R = 1, W = N</code></td><td>Writes must reach all replicas; reads ask just one.</td><td>The system is optimized for a <strong>fast read</strong>.</td></tr>
+      <tr><td><code>W = 1, R = N</code></td><td>Writes need one ack; reads must ask every replica.</td><td>The system is optimized for <strong>fast write</strong>.</td></tr>
+      <tr><td><code>W + R &gt; N</code></td><td>Write and read sets always overlap. Typical: N = 3, W = R = 2.</td><td><strong>Strong consistency</strong> is guaranteed.</td></tr>
+      <tr><td><code>W + R &lt;= N</code></td><td>Sets may not overlap; a read might hit only stale replicas.</td><td>Strong consistency is <strong>not guaranteed</strong>, but latency is lower.</td></tr>
+    </table></div>
+    <p>Depending on the requirement, we tune the values of W, R and N to reach the desired level of consistency. That is what "tunable consistency" in the requirements means.</p>
+  </section>
+
+  <section>
+    <h2 id="consistency-models">Consistency models</h2>
+    <p>A consistency model defines the degree of data consistency the system promises. There is a wide spectrum. The book highlights three:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Strong consistency</h4><p>Any read returns the value of the most recent write. A client never sees out-of-date data.</p></div>
+      <div class="card yellow"><h4>Weak consistency</h4><p>Subsequent reads may not see the most updated value.</p></div>
+      <div class="card green"><h4>Eventual consistency</h4><p>A specific form of weak consistency. Given enough time, all updates are propagated and all replicas become consistent.</p></div>
+    </div>
+    <p><strong>How strong consistency is usually achieved:</strong> force a replica to not accept new reads or writes until every replica has agreed on the current write. This approach is not ideal for highly available systems because it can block new operations.</p>
+    <p><strong>What the book's design uses:</strong> Dynamo and Cassandra adopt <strong>eventual consistency</strong>, and so does our key-value store. With eventual consistency, concurrent writes can allow inconsistent values to enter the system, and the <em>client</em> is forced to read the values and reconcile them. The next section explains how reconciliation works with versioning.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Eventual consistency is like updating your profile picture on a social network. Your friend in another country might still see your old picture for a few seconds. Nobody is harmed, and soon everyone sees the new one. Strong consistency is like an ATM: it must never show a balance that ignores your last withdrawal.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="vector-clocks">Inconsistency resolution: versioning and vector clocks</h2>
+    <p>Replication gives high availability, but it causes inconsistencies among replicas. <strong>Versioning</strong> and <strong>vector clocks</strong> are used to solve these problems.</p>
+    <p><strong>Versioning</strong> means treating each data modification as a new, immutable version of the data. Instead of overwriting, we produce version 1, version 2, and so on.</p>
+    <h3>How a conflict happens</h3>
+    <ol class="steps">
+      <li><strong>Start state.</strong> Both replica nodes n1 and n2 have the same value for key <code>name</code>: <code>"john"</code>. Call this the original value.</li>
+      <li><strong>Server 1 updates</strong> the name to <code>"johnSanFrancisco"</code> via n1.</li>
+      <li><strong>At the same time, server 2 updates</strong> the name to <code>"johnNewYork"</code> via n2.</li>
+      <li><strong>Now we have two versions</strong>, v1 and v2, both created from the original. Neither is "obviously" newer. These are <strong>conflicting values</strong>.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Two concurrent writes create a conflict</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node">name = "john"<small>original value on n1 and n2</small></div></div>
+        <div class="arch-down">↓<small>concurrent updates</small></div>
+        <div class="arch-row">
+          <div class="node sky">n1: "johnSanFrancisco"<small>v1, written by server 1</small></div>
+          <div class="node pink">n2: "johnNewYork"<small>v2, written by server 2</small></div>
+        </div>
+        <div class="arch-down">↓<small>which one wins?</small></div>
+        <div class="arch-row"><div class="node red">Conflict<small>we need a way to detect and resolve it</small></div></div>
+      </div>
+      <div class="diagram-caption">It is easy to throw away the original once we know it is older. But v1 and v2 were made independently. We need a mechanism that can detect such conflicts and help reconcile them.</div>
+    </div>
+    <h3>What is a vector clock?</h3>
+    <p>A vector clock is a <code>[server, version]</code> pair associated with a data item. It can be used to check whether one version precedes, succeeds, or is in conflict with others.</p>
+    <p>Written as <code>D([S1, v1], [S2, v2], ..., [Sn, vn])</code>, where D is a data item, v1 is a version counter and S1 is a server number. If data item D is written to server Si, the system does one of these:</p>
+    <ul>
+      <li><strong>Increment</strong> vi if <code>[Si, vi]</code> already exists.</li>
+      <li><strong>Otherwise, create</strong> a new entry <code>[Si, 1]</code>.</li>
+    </ul>
+    <p>Think of it as each server keeping its own tally of "how many times I have handled updates to this item", and the item carrying everyone's tally with it.</p>
+
+    <h3>The book's example, step by step</h3>
+    <div class="diagram"><div class="diagram-title">Vector clock example: D1 to D5</div>
+      <svg class="dg" viewBox="0 0 600 380">
+        <defs><marker id="c6-arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="190" y="20" width="220" height="44" rx="8" class="s"/><text x="300" y="47" text-anchor="middle">D1 ([Sx,1])</text>
+        <rect x="190" y="110" width="220" height="44" rx="8" class="s"/><text x="300" y="137" text-anchor="middle">D2 ([Sx,2])</text>
+        <rect x="40" y="210" width="220" height="44" rx="8" class="p"/><text x="150" y="237" text-anchor="middle">D3 ([Sx,2],[Sy,1])</text>
+        <rect x="340" y="210" width="220" height="44" rx="8" class="p"/><text x="450" y="237" text-anchor="middle">D4 ([Sx,2],[Sz,1])</text>
+        <rect x="160" y="310" width="280" height="44" rx="8" class="g"/><text x="300" y="337" text-anchor="middle">D5 ([Sx,3],[Sy,1],[Sz,1])</text>
+        <line x1="300" y1="64" x2="300" y2="106" marker-end="url(#c6-arr4)"/>
+        <text x="312" y="90" text-anchor="start" class="sm">write handled by Sx</text>
+        <line x1="280" y1="154" x2="160" y2="206" marker-end="url(#c6-arr4)"/>
+        <text x="200" y="172" text-anchor="end" class="sm">handled by Sy</text>
+        <line x1="320" y1="154" x2="440" y2="206" marker-end="url(#c6-arr4)"/>
+        <text x="400" y="172" text-anchor="start" class="sm">handled by Sz</text>
+        <line x1="150" y1="254" x2="250" y2="306" marker-end="url(#c6-arr4)"/>
+        <line x1="450" y1="254" x2="350" y2="306" marker-end="url(#c6-arr4)"/>
+        <text x="300" y="285" text-anchor="middle" class="sm">reconciled, written by Sx</text>
+        <text x="300" y="200" text-anchor="middle" class="r">conflict</text>
+      </svg>
+      <div class="diagram-caption">D3 and D4 both descend from D2 but were created independently on different servers, so they conflict. A client reconciles them into D5.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>D1.</strong> A client writes data item D1 to the system. The write is handled by server Sx. Sx has no entry yet, so it creates one: vector clock <code>D1([Sx, 1])</code>.</li>
+      <li><strong>D2.</strong> Another client reads the latest D1, updates it to D2 and writes it back. D2 overwrites D1. Assume the write is handled by the same server Sx, which now increments its counter: <code>D2([Sx, 2])</code>.</li>
+      <li><strong>D3.</strong> Another client reads the latest D2, updates it to D3 and writes it back. Assume this write is handled by server Sy. Sx's counter stays at 2; Sy adds its own entry: <code>D3([Sx, 2], [Sy, 1])</code>.</li>
+      <li><strong>D4.</strong> Another client <em>also</em> reads the latest D2 (not D3), updates it to D4 and writes it back. This write is handled by server Sz: <code>D4([Sx, 2], [Sz, 1])</code>.</li>
+      <li><strong>Conflict detected.</strong> When another client reads D3 and D4, it discovers a conflict, caused by data item D2 being modified by both Sy and Sz. Neither D3 nor D4 includes the other's change.</li>
+      <li><strong>D5.</strong> The client resolves the conflict (for example, by merging the two values) and sends the updated data to the server. Assume the write is handled by Sx, so Sx increments to 3, and the other entries are kept: <code>D5([Sx, 3], [Sy, 1], [Sz, 1])</code>.</li>
+    </ol>
+    <h3>How to tell "ancestor" from "conflict"</h3>
+    <p>Using vector clocks, it is easy to tell whether version X is an ancestor of version Y (meaning no conflict, Y simply came later) or a sibling (conflict).</p>
+    <div class="cards">
+      <div class="card green"><h4>X is an ancestor of Y (no conflict)</h4><p>If the counter of <strong>every</strong> participant in Y's vector clock is <strong>greater than or equal to</strong> the matching counter in X. Example: <code>D([s0,1],[s1,1])</code> is an ancestor of <code>D([s0,1],[s1,2])</code>. Safe to discard X.</p></div>
+      <div class="card red"><h4>X and Y are siblings (conflict)</h4><p>If there is <strong>any</strong> participant in Y's vector clock whose counter is <strong>less than</strong> its counter in X (and vice versa). Example: <code>D([s0,1],[s1,2])</code> and <code>D([s0,2],[s1,1])</code> conflict: each is ahead on one server.</p></div>
+    </div>
+    <p>Apply this to the example: compare D3 <code>[Sx,2],[Sy,1]</code> with D4 <code>[Sx,2],[Sz,1]</code>. D3 has Sy = 1 but D4 has Sy = 0 (missing means 0). D4 has Sz = 1 but D3 has Sz = 0. Each is ahead on something, so they are siblings: conflict. Compare D2 <code>[Sx,2]</code> with D3: D3 is &gt;= D2 everywhere, so D2 is simply an ancestor and can be thrown away.</p>
+<pre><code>// Is clock a an ancestor of (or equal to) clock b?
+function isAncestor(a, b):
+    for each server s in union(keys(a), keys(b)):
+        if a.get(s, 0) &gt; b.get(s, 0):
+            return false
+    return true
+
+function compare(a, b):
+    if isAncestor(a, b): return "a happened before b (keep b)"
+    if isAncestor(b, a): return "b happened before a (keep a)"
+    return "conflict: siblings, client must reconcile"</code></pre>
+    <h3>Downsides of vector clocks</h3>
+    <div class="pros-cons">
+      <div class="pros"><h4>What they give us</h4><ul>
+        <li>Precise detection of conflicts versus simple overwrites.</li>
+        <li>No need for synchronized wall clocks across servers.</li>
+        <li>Lets an AP system accept writes everywhere and sort it out later.</li>
+      </ul></div>
+      <div class="cons"><h4>Downsides (from the book)</h4><ul>
+        <li><strong>Client complexity:</strong> vector clocks add complexity to the client because it needs to implement conflict resolution logic.</li>
+        <li><strong>Size can grow rapidly:</strong> the <code>[server: version]</code> pairs could grow quickly. The fix is to set a <strong>threshold</strong> for the length; if it exceeds the limit, the oldest pairs are removed. This can make reconciliation inefficient because the descendant relationship cannot be determined accurately. However, based on the Dynamo paper, Amazon has not yet encountered this problem in production, so it is probably an acceptable solution for most companies.</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="failure-detection">Handling failures: failure detection</h2>
+    <p>In any large system at scale, failures are not only inevitable but common. Handling failure scenarios is very important. First, we need to <em>detect</em> failures.</p>
+    <p>In a distributed system, it is insufficient to believe a server is down just because <em>one</em> other server says so. Maybe the problem is just the network between those two. Usually it requires at least two independent sources of information to mark a server down.</p>
+    <h3>Option 1: all-to-all multicasting</h3>
+    <p>Every node sends heartbeats directly to every other node. This is straightforward, but it is inefficient when many servers are in the system: with n servers, the number of messages grows roughly with n squared.</p>
+    <h3>Option 2: gossip protocol (the better choice)</h3>
+    <p>A decentralized failure detection method like the gossip protocol is better. Here is how it works, following the book:</p>
+    <ol class="steps">
+      <li><strong>Each node maintains a node membership list</strong>, which contains member IDs and heartbeat counters.</li>
+      <li><strong>Each node periodically increments its own heartbeat counter.</strong> A counter that keeps going up means "I'm alive".</li>
+      <li><strong>Each node periodically sends heartbeats to a set of random nodes</strong>, which in turn propagate to another set of nodes. Like a rumour spreading through a school.</li>
+      <li><strong>Once nodes receive heartbeats, the membership list is updated</strong> to the latest info (take the higher counter, note the local time).</li>
+      <li><strong>If the heartbeat has not increased for more than a predefined period</strong>, the member is considered offline.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">All-to-all multicast vs gossip</div>
+      <svg class="dg" viewBox="0 0 700 260">
+        <line x1="80" y1="70" x2="260" y2="70"/><line x1="80" y1="190" x2="260" y2="190"/>
+        <line x1="80" y1="70" x2="80" y2="190"/><line x1="260" y1="70" x2="260" y2="190"/>
+        <line x1="80" y1="70" x2="260" y2="190"/><line x1="260" y1="70" x2="80" y2="190"/>
+        <circle cx="80" cy="70" r="24" class="s"/><text x="80" y="75" text-anchor="middle">s0</text>
+        <circle cx="260" cy="70" r="24" class="s"/><text x="260" y="75" text-anchor="middle">s1</text>
+        <circle cx="80" cy="190" r="24" class="s"/><text x="80" y="195" text-anchor="middle">s2</text>
+        <circle cx="260" cy="190" r="24" class="s"/><text x="260" y="195" text-anchor="middle">s3</text>
+        <text x="170" y="25" text-anchor="middle">All-to-all</text>
+        <text x="170" y="245" text-anchor="middle" class="sm">everyone pings everyone: grows ~n squared</text>
+        <line x1="440" y1="70" x2="620" y2="70" class="g"/><line x1="440" y1="70" x2="620" y2="190" class="g"/>
+        <line x1="620" y1="190" x2="440" y2="190" class="g" stroke-dasharray="5 4"/>
+        <circle cx="440" cy="70" r="24" class="g"/><text x="440" y="75" text-anchor="middle">s0</text>
+        <circle cx="620" cy="70" r="24" class="s"/><text x="620" y="75" text-anchor="middle">s1</text>
+        <circle cx="440" cy="190" r="24" class="s"/><text x="440" y="195" text-anchor="middle">s2</text>
+        <circle cx="620" cy="190" r="24" class="s"/><text x="620" y="195" text-anchor="middle">s3</text>
+        <text x="530" y="25" text-anchor="middle">Gossip</text>
+        <text x="530" y="245" text-anchor="middle" class="sm">s0 tells a few random peers; they pass it on</text>
+      </svg>
+      <div class="diagram-caption">Left: every pair exchanges heartbeats, which explodes with hundreds of nodes. Right: s0 gossips its membership list to two random nodes (solid), and s3 later forwards it onwards (dashed). Information still reaches everyone, with far fewer messages.</div>
+    </div>
+    <h3>Worked example: the membership table</h3>
+    <p>Here is node s0's membership list at some moment (values from the book's figure). The current time is around 12:00:34.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Member ID</th><th>Heartbeat counter</th><th>Time (last updated)</th></tr>
+      <tr><td>0</td><td>10232</td><td>12:00:01</td></tr>
+      <tr><td>1</td><td>10224</td><td>12:00:10</td></tr>
+      <tr><td><strong>2</strong></td><td><strong>9908</strong></td><td><strong>11:58:02</strong> (stale)</td></tr>
+      <tr><td>3</td><td>10237</td><td>12:00:20</td></tr>
+      <tr><td>4</td><td>10234</td><td>12:00:34</td></tr>
+    </table></div>
+    <ol class="steps">
+      <li><strong>s0 notices</strong> that node s2's (member ID 2) heartbeat counter has not increased for a long time: its last update was at 11:58:02, while everyone else updated within the last 30 seconds or so.</li>
+      <li><strong>s0 gossips</strong> heartbeats that include s2's info to a set of random nodes.</li>
+      <li><strong>Other nodes confirm</strong> that s2's heartbeat counter has not been updated for a long time on their side either.</li>
+      <li><strong>s2 is marked down</strong>, and this information is propagated to other nodes.</li>
+    </ol>
+    <div class="callout tip"><div class="callout-title">Why this is clever</div>
+      <p>No central "monitor" server is needed (which could itself fail). And because several nodes independently notice s2's stale counter, we satisfy the "at least two independent sources" rule before declaring s2 dead.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="temporary-failures">Handling temporary failures: sloppy quorum and hinted handoff</h2>
+    <p>After failures have been detected through gossip, the system needs to keep working. Under a strict quorum approach, reads and writes could be <strong>blocked</strong>: if key0's three replicas are s1, s2, s3 and W = 2, but s2 and s3 are down, the write cannot succeed. That hurts availability.</p>
+    <h3>Sloppy quorum</h3>
+    <p>A technique called <strong>sloppy quorum</strong> is used to improve availability. Instead of enforcing the quorum requirement on the exact replica set, the system chooses the <strong>first W healthy servers for writes</strong> and the <strong>first R healthy servers for reads</strong> on the hash ring. Offline servers are ignored.</p>
+    <h3>Hinted handoff</h3>
+    <p>If a server is unavailable due to network or server failures, another server will process requests temporarily. When the down server is up again, changes are pushed back to it to achieve data consistency. This process is called <strong>hinted handoff</strong>: the stand-in stores the data with a "hint" saying who it really belongs to.</p>
+    <div class="diagram"><div class="diagram-title">s2 is down: s3 stands in</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node yellow">Coordinator<small>put(key0, v) with N=3, W=2</small></div></div>
+        <div class="arch-down">↓<small>walk the ring, skip unhealthy servers</small></div>
+        <div class="arch-row">
+          <div class="node green">s0<small>healthy, stores key0</small></div>
+          <div class="node green">s1<small>healthy, stores key0</small></div>
+          <div class="node red">s2<small>DOWN, skipped</small></div>
+          <div class="node sky">s3<small>stand-in, stores key0 + hint "for s2"</small></div>
+        </div>
+        <div class="arch-down">↓<small>later, when s2 recovers</small></div>
+        <div class="arch-row"><div class="node sky">s3</div><div class="arrow">→<small>hinted handoff</small></div><div class="node green">s2<small>back online, gets its data</small></div></div>
+      </div>
+      <div class="diagram-caption">Following the book's figure: s2 is unavailable, so reads and writes are temporarily handled by s3. When s2 comes back online, s3 hands the data back to s2.</div>
+    </div>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Your neighbour is on holiday, so the mail carrier leaves their parcel with you, with a sticky note "for house 12". When they return, you hand it over. You never pretend the parcel is yours.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Trade-off</div>
+      <p>Sloppy quorum favours availability over consistency. While s2 is down, a read that happens to hit s2's old data elsewhere could be stale. This fits an AP design; you would not do this in a bank ledger.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="permanent-failures">Handling permanent failures: anti-entropy with Merkle trees</h2>
+    <p>Hinted handoff handles temporary failures. But what if a replica is <strong>permanently</strong> unavailable, or a stand-in also dies before handing data back? Replicas drift apart. To fix this, we implement an <strong>anti-entropy protocol</strong> to keep replicas in sync. Anti-entropy involves comparing each piece of data on replicas and updating each replica to the newest version.</p>
+    <p>The naive approach, sending every key from server A to server B to compare, would move enormous amounts of data. A <strong>Merkle tree</strong> is used to detect inconsistencies and minimize the amount of data transferred.</p>
+    <div class="callout info"><div class="callout-title">What is a Merkle tree?</div>
+      <p>A hash tree or Merkle tree is a tree in which every non-leaf node is labelled with the hash of the labels or values of its child nodes. Hash trees allow efficient and secure verification of the contents of large data structures. Key property: if anything underneath changes, every hash above it, all the way to the root, changes too.</p>
+    </div>
+    <h3>Building a Merkle tree, step by step (book example: key space 1 to 12)</h3>
+    <ol class="steps">
+      <li><strong>Divide the key space into buckets.</strong> In the example, 4 buckets: keys 1-3, 4-6, 7-9, 10-12. A bucket is used as the root-level node to maintain a limited depth of the tree.</li>
+      <li><strong>Hash each key in a bucket</strong> using a uniform hashing method.</li>
+      <li><strong>Create a single hash node per bucket</strong> by hashing together the hashes of all keys in it.</li>
+      <li><strong>Build the tree upwards</strong> to the root by calculating hashes of children: two bucket hashes combine into a parent, two parents combine into the root.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Comparing two replicas with Merkle trees</div>
+      <svg class="dg" viewBox="0 0 760 290">
+        <text x="190" y="18" text-anchor="middle" class="s">Server 1</text>
+        <line x1="190" y1="66" x2="100" y2="110"/><line x1="190" y1="66" x2="280" y2="110"/>
+        <line x1="100" y1="146" x2="55" y2="190"/><line x1="100" y1="146" x2="145" y2="190"/>
+        <line x1="280" y1="146" x2="235" y2="190"/><line x1="280" y1="146" x2="325" y2="190"/>
+        <rect x="140" y="30" width="100" height="36" rx="8" class="s"/><text x="190" y="53" text-anchor="middle">root 7c2e</text>
+        <rect x="55" y="110" width="90" height="36" rx="8"/><text x="100" y="133" text-anchor="middle">91ab</text>
+        <rect x="235" y="110" width="90" height="36" rx="8"/><text x="280" y="133" text-anchor="middle">e04d</text>
+        <rect x="15" y="190" width="80" height="36" rx="8"/><text x="55" y="213" text-anchor="middle">1f3a</text>
+        <rect x="105" y="190" width="80" height="36" rx="8"/><text x="145" y="213" text-anchor="middle">6b70</text>
+        <rect x="195" y="190" width="80" height="36" rx="8"/><text x="235" y="213" text-anchor="middle">c2d9</text>
+        <rect x="285" y="190" width="80" height="36" rx="8"/><text x="325" y="213" text-anchor="middle">58e1</text>
+        <text x="55" y="245" text-anchor="middle" class="sm">keys 1-3</text>
+        <text x="145" y="245" text-anchor="middle" class="sm">keys 4-6</text>
+        <text x="235" y="245" text-anchor="middle" class="sm">keys 7-9</text>
+        <text x="325" y="245" text-anchor="middle" class="sm">keys 10-12</text>
+        <text x="580" y="18" text-anchor="middle" class="s">Server 2</text>
+        <line x1="580" y1="66" x2="490" y2="110"/><line x1="580" y1="66" x2="670" y2="110" class="r"/>
+        <line x1="490" y1="146" x2="445" y2="190"/><line x1="490" y1="146" x2="535" y2="190"/>
+        <line x1="670" y1="146" x2="625" y2="190" class="r"/><line x1="670" y1="146" x2="715" y2="190"/>
+        <rect x="530" y="30" width="100" height="36" rx="8" class="r"/><text x="580" y="53" text-anchor="middle" class="r">root 3d8f</text>
+        <rect x="445" y="110" width="90" height="36" rx="8"/><text x="490" y="133" text-anchor="middle">91ab</text>
+        <rect x="625" y="110" width="90" height="36" rx="8" class="r"/><text x="670" y="133" text-anchor="middle" class="r">7a65</text>
+        <rect x="405" y="190" width="80" height="36" rx="8"/><text x="445" y="213" text-anchor="middle">1f3a</text>
+        <rect x="495" y="190" width="80" height="36" rx="8"/><text x="535" y="213" text-anchor="middle">6b70</text>
+        <rect x="585" y="190" width="80" height="36" rx="8" class="r"/><text x="625" y="213" text-anchor="middle" class="r">0e44</text>
+        <rect x="675" y="190" width="80" height="36" rx="8"/><text x="715" y="213" text-anchor="middle">58e1</text>
+        <text x="445" y="245" text-anchor="middle" class="sm">keys 1-3</text>
+        <text x="535" y="245" text-anchor="middle" class="sm">keys 4-6</text>
+        <text x="625" y="245" text-anchor="middle" class="sm">keys 7-9</text>
+        <text x="715" y="245" text-anchor="middle" class="sm">keys 10-12</text>
+        <text x="625" y="272" text-anchor="middle" class="r">only this bucket is synced</text>
+        <text x="190" y="272" text-anchor="middle" class="sm">hash values are illustrative</text>
+      </svg>
+      <div class="diagram-caption">Server 2 has a different value for one key in bucket 3 (keys 7-9). That changes bucket 3's hash, its parent's hash, and the root hash (red). Matching hashes elsewhere prove those parts are identical.</div>
+    </div>
+    <h3>Comparing two trees</h3>
+    <ol class="steps">
+      <li><strong>Compare root hashes.</strong> If the root hashes match, both servers have the same data. Done, having exchanged a single hash.</li>
+      <li><strong>If they disagree, compare the children.</strong> The left child hashes match (91ab = 91ab), so keys 1-6 are identical; skip that whole half. The right child hashes differ (e04d vs 7a65), so go down that side.</li>
+      <li><strong>Keep descending</strong> until you reach the leaves. Bucket 4 matches (58e1); bucket 3 differs (c2d9 vs 0e44).</li>
+      <li><strong>Synchronize only the differing buckets.</strong> Exchange just the keys 7-9 and update to the newest versions.</li>
+    </ol>
+    <p>Using Merkle trees, the amount of data that needs to be synchronized is proportional to the <strong>differences</strong> between the two replicas, not the amount of data they contain. In real-world systems the bucket size is quite big. For instance, a possible configuration is one million buckets per one billion keys, so each bucket only contains 1,000 keys.</p>
+  </section>
+
+  <section>
+    <h2 id="data-center-outage">Handling data center outage</h2>
+    <p>A data center outage could happen due to power outage, network outage, natural disaster, and so on. To build a system capable of handling data center outage, it is important to <strong>replicate data across multiple data centers</strong>. Even if a data center is completely offline, users can still access data through the other data centers. This is why, in the replication section, we placed replicas in distinct data centers.</p>
+  </section>
+
+  <section>
+    <h2 id="system-architecture">System architecture diagram</h2>
+    <p>Now that the techniques are clear, here is how they fit together at the cluster level.</p>
+    <div class="diagram"><div class="diagram-title">Cluster architecture</div>
+      <svg class="dg" viewBox="0 0 600 390">
+        <defs><marker id="c6-arr5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <circle cx="300" cy="210" r="130" style="fill:none" stroke-dasharray="4 5"/>
+        <rect x="20" y="30" width="100" height="44" rx="8" class="a"/><text x="70" y="57" text-anchor="middle">Client</text>
+        <line x1="120" y1="56" x2="274" y2="78" marker-start="url(#c6-arr5)" marker-end="url(#c6-arr5)" class="a"/>
+        <text x="190" y="44" text-anchor="middle" class="sm">read / write</text>
+        <text x="300" y="44" text-anchor="middle" class="y">coordinator</text>
+        <circle cx="300" cy="80" r="24" class="y"/><text x="300" y="85" text-anchor="middle">n0</text>
+        <circle cx="413" cy="145" r="24" class="g"/><text x="413" y="150" text-anchor="middle">n1</text>
+        <circle cx="413" cy="275" r="24" class="g"/><text x="413" y="280" text-anchor="middle">n2</text>
+        <circle cx="300" cy="340" r="24" class="s"/><text x="300" y="345" text-anchor="middle">n3</text>
+        <circle cx="187" cy="275" r="24" class="s"/><text x="187" y="280" text-anchor="middle">n4</text>
+        <circle cx="187" cy="145" r="24" class="s"/><text x="187" y="150" text-anchor="middle">n5</text>
+        <line x1="322" y1="92" x2="390" y2="132" class="g" marker-end="url(#c6-arr5)"/>
+        <line x1="413" y1="169" x2="413" y2="249" class="g" marker-end="url(#c6-arr5)"/>
+        <text x="445" y="214" text-anchor="start" class="g">replicate</text>
+        <text x="300" y="200" text-anchor="middle">decentralized ring</text>
+        <text x="300" y="220" text-anchor="middle" class="sm">no master; every node has</text>
+        <text x="300" y="236" text-anchor="middle" class="sm">the same responsibilities</text>
+      </svg>
+      <div class="diagram-caption">Clients talk to the store through simple APIs: get(key) and put(key, value). A coordinator node (n0 here) acts as a proxy between the client and the store. Data is replicated to the next nodes on the ring (n1, n2 for N = 3).</div>
+    </div>
+    <p>Main features of the architecture, as listed in the book:</p>
+    <ul>
+      <li>Clients communicate with the key-value store through simple APIs: <code>get(key)</code> and <code>put(key, value)</code>.</li>
+      <li>A <strong>coordinator</strong> is a node that acts as a proxy between the client and the key-value store.</li>
+      <li>Nodes are distributed on a ring using <strong>consistent hashing</strong>.</li>
+      <li>The system is completely <strong>decentralized</strong>, so adding and moving nodes can be automatic.</li>
+      <li>Data is <strong>replicated at multiple nodes</strong>.</li>
+      <li>There is <strong>no single point of failure</strong>, as every node has the same set of responsibilities.</li>
+    </ul>
+    <p>Because the design is decentralized, each node performs many tasks. Every node includes:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Client API</h4><p>Accepts get and put calls.</p></div>
+      <div class="card yellow"><h4>Coordinator</h4><p>Forwards requests to replicas and counts quorum acks.</p></div>
+      <div class="card green"><h4>Replication</h4><p>Copies data to the next N-1 nodes.</p></div>
+      <div class="card purple"><h4>Conflict resolution</h4><p>Tracks vector clocks, surfaces siblings.</p></div>
+      <div class="card pink"><h4>Failure detection</h4><p>Runs the gossip protocol.</p></div>
+      <div class="card red"><h4>Failure repair</h4><p>Hinted handoff and Merkle-tree anti-entropy.</p></div>
+      <div class="card teal"><h4>Storage engine</h4><p>Commit log, memory cache, SSTables (next sections).</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="write-path">Write path</h2>
+    <p>What happens inside a single node when a write arrives? The book's design is based on the architecture of Cassandra.</p>
+    <div class="diagram"><div class="diagram-title">Write path inside one node</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Client<small>put(key, value)</small></div></div>
+        <div class="arch-down">↓<small>1. append</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">Disk</span><div class="node db yellow">Commit log<small>append-only, survives crashes</small></div></div></div>
+        <div class="arch-down">↓<small>2. save</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">Memory</span><div class="node green">Memory cache<small>fast in-RAM table (memtable)</small></div></div></div>
+        <div class="arch-down">↓<small>3. flush when full / threshold reached</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">Disk</span><div class="node db sky">SSTable 1</div><div class="node db sky">SSTable 2</div><div class="node db sky">SSTable 3</div></div></div>
+      </div>
+      <div class="diagram-caption">Writes are cheap: one sequential append to disk plus an in-memory update. The expensive sorted-file writing happens later in bulk.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>The write request is persisted on a commit log file.</strong> Appending to the end of a file is the fastest kind of disk write. If the server crashes, it can replay the log on restart so no acknowledged write is lost.</li>
+      <li><strong>Data is saved in the memory cache.</strong> Now reads of this key can be served from RAM.</li>
+      <li><strong>When the memory cache is full or reaches a predefined threshold, data is flushed to an SSTable on disk.</strong> The memory is then cleared for new writes.</li>
+    </ol>
+    <div class="callout info"><div class="callout-title">What is an SSTable, simply?</div>
+      <p>A <strong>sorted-string table (SSTable)</strong> is a sorted list of &lt;key, value&gt; pairs stored in a file. "Sorted" means keys are in order (apple, banana, cherry...), which makes finding a key in the file fast, like looking up a word in a dictionary instead of a shuffled pile of index cards. SSTables are <strong>immutable</strong>: once written they are never changed. New values for a key go into newer SSTables, so when reading, newer SSTables win.</p>
+    </div>
+    <div class="diagram"><div class="diagram-title">From memory cache to SSTable</div>
+      <div class="flow">
+        <div class="node green">Memory cache<small>cherry=7, apple=2, banana=5</small></div>
+        <div class="arrow">→<small>sort and flush</small></div>
+        <div class="node db sky">SSTable file<small>apple=2 | banana=5 | cherry=7</small></div>
+      </div>
+      <div class="diagram-caption">The flush writes keys in sorted order to a brand-new file in one big sequential write.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="read-path">Read path and Bloom filters</h2>
+    <p>After a read request is directed to a specific node, it first checks whether the data is in the memory cache.</p>
+    <div class="diagram"><div class="diagram-title">Read path when data IS in memory</div>
+      <div class="flow">
+        <div class="node accent">Client<small>get(key)</small></div>
+        <div class="arrow">→</div>
+        <div class="node green">Memory cache<small>hit</small></div>
+        <div class="arrow">→<small>return value</small></div>
+        <div class="node accent">Client</div>
+      </div>
+      <div class="diagram-caption">Best case: the value is in RAM and is returned immediately.</div>
+    </div>
+    <p>If the data is not in memory, it is retrieved from disk instead. But a node may have many SSTables. Opening every file to look for the key would be slow. We need an efficient way to find out which SSTable contains the key. A <strong>Bloom filter</strong> is commonly used to solve this problem.</p>
+    <div class="diagram"><div class="diagram-title">Read path when data is NOT in memory</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Client<small>get(key)</small></div></div>
+        <div class="arch-down">↓<small>1. check memory</small></div>
+        <div class="arch-row"><div class="node red">Memory cache<small>miss</small></div></div>
+        <div class="arch-down">↓<small>2. check Bloom filter</small></div>
+        <div class="arch-row"><div class="node purple">Bloom filters<small>3. which SSTables might contain the key?</small></div></div>
+        <div class="arch-down">↓<small>4. read only those</small></div>
+        <div class="arch-row"><div class="node db sky">SSTable 1<small>skipped</small></div><div class="node db green">SSTable 2<small>maybe: read it</small></div><div class="node db sky">SSTable 3<small>skipped</small></div></div>
+        <div class="arch-down">↓<small>5. return the result</small></div>
+        <div class="arch-row"><div class="node accent">Client</div></div>
+      </div>
+      <div class="diagram-caption">The book's five steps: check memory; if missing, check the Bloom filter; the Bloom filter figures out which SSTables might contain the key; SSTables return the result; the result is returned to the client.</div>
+    </div>
+    <h3>Bloom filters, simply</h3>
+    <p>A Bloom filter is a row of bits (0s and 1s), all starting at 0, plus a few hash functions. Each SSTable has its own Bloom filter.</p>
+    <ul>
+      <li><strong>Adding a key:</strong> run the key through, say, 3 hash functions. Each gives a position in the bit array. Set those 3 bits to 1.</li>
+      <li><strong>Checking a key:</strong> run it through the same 3 hashes. If <em>any</em> of those bits is 0, the key is <strong>definitely not</strong> in this SSTable, so skip it. If all are 1, the key is <strong>probably</strong> there, so read the file.</li>
+    </ul>
+    <div class="diagram"><div class="diagram-title">Bloom filter with 12 bits and 3 hash functions</div>
+      <svg class="dg" viewBox="0 0 600 160">
+        <defs><marker id="c6-arr6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="235" y="4" width="130" height="34" rx="8" class="a"/><text x="300" y="26" text-anchor="middle">add "apple"</text>
+        <line x1="280" y1="38" x2="104" y2="76" marker-end="url(#c6-arr6)"/>
+        <line x1="300" y1="38" x2="262" y2="76" marker-end="url(#c6-arr6)"/>
+        <line x1="320" y1="38" x2="418" y2="76" marker-end="url(#c6-arr6)"/>
+        <text x="175" y="50" text-anchor="middle" class="sm">h1</text>
+        <text x="290" y="62" text-anchor="start" class="sm">h2</text>
+        <text x="390" y="50" text-anchor="middle" class="sm">h3</text>
+        <rect x="60" y="80" width="40" height="40" rx="0"/><text x="80" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="100" y="80" width="40" height="40" rx="0" class="g"/><text x="120" y="105" text-anchor="middle" class="g">1</text>
+        <rect x="140" y="80" width="40" height="40" rx="0"/><text x="160" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="180" y="80" width="40" height="40" rx="0"/><text x="200" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="220" y="80" width="40" height="40" rx="0"/><text x="240" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="260" y="80" width="40" height="40" rx="0" class="g"/><text x="280" y="105" text-anchor="middle" class="g">1</text>
+        <rect x="300" y="80" width="40" height="40" rx="0"/><text x="320" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="340" y="80" width="40" height="40" rx="0"/><text x="360" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="380" y="80" width="40" height="40" rx="0"/><text x="400" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="420" y="80" width="40" height="40" rx="0" class="g"/><text x="440" y="105" text-anchor="middle" class="g">1</text>
+        <rect x="460" y="80" width="40" height="40" rx="0"/><text x="480" y="105" text-anchor="middle" class="sm">0</text>
+        <rect x="500" y="80" width="40" height="40" rx="0"/><text x="520" y="105" text-anchor="middle" class="sm">0</text>
+        <text x="80" y="140" text-anchor="middle" class="sm">0</text><text x="120" y="140" text-anchor="middle" class="sm">1</text>
+        <text x="160" y="140" text-anchor="middle" class="sm">2</text><text x="200" y="140" text-anchor="middle" class="sm">3</text>
+        <text x="240" y="140" text-anchor="middle" class="sm">4</text><text x="280" y="140" text-anchor="middle" class="sm">5</text>
+        <text x="320" y="140" text-anchor="middle" class="sm">6</text><text x="360" y="140" text-anchor="middle" class="sm">7</text>
+        <text x="400" y="140" text-anchor="middle" class="sm">8</text><text x="440" y="140" text-anchor="middle" class="sm">9</text>
+        <text x="480" y="140" text-anchor="middle" class="sm">10</text><text x="520" y="140" text-anchor="middle" class="sm">11</text>
+        <text x="300" y="157" text-anchor="middle" class="sm">bit positions</text>
+      </svg>
+      <div class="diagram-caption">"apple" hashes to positions 1, 5 and 9, so those bits become 1. Later, checking "grape" might hash to 1, 3, 9: bit 3 is 0, so "grape" is definitely not in this SSTable and the file is never opened. (Positions are illustrative.)</div>
+    </div>
+    <div class="callout tip"><div class="callout-title">Why Bloom filters are perfect here</div>
+      <p>They are tiny (a few bits per key, so they fit in memory) and never give a false "no". They can give a false "maybe" (a <em>false positive</em>), which just costs one unnecessary file read. That is a great deal: we skip almost every SSTable that does not contain the key.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <p>Let us follow one <code>put</code> and one <code>get</code> end to end with N = 3, W = 2, R = 2.</p>
+    <div class="diagram"><div class="diagram-title">End-to-end request flow</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Client<small>put("cart:42", ["book"])</small></div></div>
+        <div class="arch-down">↓<small>any node can receive it</small></div>
+        <div class="arch-row"><div class="node yellow">Coordinator node<small>hash key on ring, find first 3 unique healthy servers</small></div></div>
+        <div class="arch-down">↓<small>send in parallel, attach vector clock</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">DC A</span><div class="node db green">Replica 1<small>commit log, memory cache</small></div></div>
+          <div class="group"><span class="group-label">DC B</span><div class="node db green">Replica 2<small>commit log, memory cache</small></div></div>
+          <div class="group"><span class="group-label">DC C</span><div class="node db red">Replica 3<small>down: hinted handoff to a stand-in</small></div></div>
+        </div>
+        <div class="arch-down">↓<small>2 acks = W reached, reply success</small></div>
+        <div class="arch-row"><div class="node purple">Background<small>gossip detects failures, hints replayed, Merkle trees repair drift, memory flushed to SSTables</small></div></div>
+      </div>
+      <div class="diagram-caption">Every technique in the chapter has a job in this one picture.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Partition:</strong> the coordinator hashes <code>cart:42</code> onto the consistent hashing ring.</li>
+      <li><strong>Replicate:</strong> it walks clockwise and picks the first 3 unique servers, located in different data centers.</li>
+      <li><strong>Handle failures:</strong> gossip has already told it Replica 3 is down, so with a sloppy quorum it uses the next healthy server, which stores the write with a hint.</li>
+      <li><strong>Write path:</strong> each replica appends to its commit log and updates its memory cache, then acks.</li>
+      <li><strong>Quorum:</strong> after W = 2 acks, the coordinator tells the client "success".</li>
+      <li><strong>Read later:</strong> a <code>get</code> asks R = 2 replicas. Since W + R &gt; N, at least one has the latest version. Each replica checks its memory cache, then Bloom filters, then SSTables.</li>
+      <li><strong>Conflicts:</strong> if the replicas return versions whose vector clocks are siblings, both are returned and the client reconciles them, writing back a merged version.</li>
+      <li><strong>Repair:</strong> when Replica 3 comes back, hinted handoff gives it the data; anti-entropy with Merkle trees catches anything else that drifted.</li>
+    </ol>
+    <h3>The book's summary table</h3>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Goal / problem</th><th>Technique</th></tr>
+      <tr><td>Ability to store big data</td><td>Use consistent hashing to spread the load across servers</td></tr>
+      <tr><td>High availability reads</td><td>Data replication; multi-data center setup</td></tr>
+      <tr><td>Highly available writes</td><td>Versioning and conflict resolution with vector clocks</td></tr>
+      <tr><td>Dataset partition</td><td>Consistent hashing</td></tr>
+      <tr><td>Incremental scalability</td><td>Consistent hashing</td></tr>
+      <tr><td>Heterogeneity</td><td>Consistent hashing (virtual nodes)</td></tr>
+      <tr><td>Tunable consistency</td><td>Quorum consensus</td></tr>
+      <tr><td>Handling temporary failures</td><td>Sloppy quorum and hinted handoff</td></tr>
+      <tr><td>Handling permanent failures</td><td>Merkle tree (anti-entropy)</td></tr>
+      <tr><td>Handling data center outage</td><td>Cross-data center replication</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="interview">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Understand the problem and establish scope</div><div class="iv-time">3–10 min</div></div>
+      <ul><li>Confirm the API: <code>put(key, value)</code>, <code>get(key)</code>.</li><li>Pin down: value size (&lt;10 KB), data volume, availability vs consistency, latency.</li><li>Ask what the data is used for, because that decides CP vs AP.</li></ul>
+      <div class="say">"Just to confirm the scope: we need get and put, values under 10 KB, a data set too big for one machine, high availability and scalability, automatic scaling, tunable consistency and low latency. Is this closer to a shopping cart, where availability matters most, or a bank ledger, where consistency matters most?"</div>
+      <div class="say them">"Assume availability is more important. Users should always be able to write."</div>
+      <div class="say">"Then I will design an AP system with eventual consistency by default, like Dynamo or Cassandra, but expose N, W and R so a caller can choose stronger consistency when needed."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">Start simple, then justify going distributed</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Single server: in-memory hash table, compression, hot data in memory.</li><li>Explain why it fails: capacity and single point of failure.</li><li>Introduce CAP and state your choice.</li></ul>
+      <div class="say">"On one machine, a hash table in memory is enough, and I could compress values and keep only hot data in RAM. But we quickly hit memory limits and have a single point of failure, so we need to distribute. Once we distribute, partitions are unavoidable, so the real choice is CP or AP. We chose AP."</div>
+      <div class="say them">"Why can't you just have CA?"</div>
+      <div class="say">"CA means assuming the network never fails. In a real multi-machine system network failures happen, so partition tolerance is not optional. When the network splits, I must either reject requests to stay consistent, or answer and risk staleness."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">High-level design: partition, replicate, quorum</div><div class="iv-time">10–15 min</div></div>
+      <ul><li>Consistent hashing with virtual nodes for partitioning, automatic scaling and heterogeneity.</li><li>Replication: first N unique servers clockwise, across data centers.</li><li>Quorum: coordinator, N/W/R, the four configurations.</li><li>Draw the ring and the coordinator diagram.</li></ul>
+      <div class="say">"Keys are placed on a consistent hashing ring. Each key is stored on the first N = 3 unique physical servers clockwise, spread across data centers. A coordinator forwards each request to all replicas and waits for W acks on writes and R responses on reads. With N = 3, W = R = 2 we get W + R &gt; N, so reads overlap the latest write."</div>
+      <div class="say them">"What if I want the fastest possible reads?"</div>
+      <div class="say">"Set R = 1 and W = N. Reads only wait for one replica, and every write has reached all replicas, so any single replica is up to date. The cost is slower writes and writes failing if any replica is unreachable."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Deep dive: conflicts and failures</div><div class="iv-time">10–15 min</div></div>
+      <ul><li>Vector clocks: walk through the D1 to D5 example; ancestor vs sibling rule; downsides.</li><li>Gossip protocol with heartbeat counters.</li><li>Sloppy quorum + hinted handoff for temporary failures.</li><li>Merkle trees for permanent failures; multi-DC replication for outages.</li></ul>
+      <div class="say">"Because we accept writes on any replica, two clients can update the same key concurrently. Each version carries a vector clock. If one clock is greater than or equal to the other on every server, it simply supersedes it. Otherwise they are siblings, and we return both to the client to merge."</div>
+      <div class="say them">"How do you know a node is dead, and what happens to its writes?"</div>
+      <div class="say">"Each node has a membership list of heartbeat counters and gossips it to random peers. If a node's counter does not increase for a set period, and others confirm, it is marked down. Writes for it go to the next healthy node via sloppy quorum, stored with a hint, and handed back when it recovers. If it is gone for good, Merkle-tree anti-entropy finds and repairs only the differing buckets."</div>
+      <div class="say them">"Your vector clocks keep growing. Is that a problem?"</div>
+      <div class="say">"We cap the length with a threshold and drop the oldest pairs. That can make ancestry detection imprecise, but the Dynamo paper reports Amazon has not run into this in production, so it is an acceptable trade-off."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">5</div><div class="iv-title">Storage engine and wrap up</div><div class="iv-time">3–5 min</div></div>
+      <ul><li>Write path: commit log, memory cache, flush to SSTable.</li><li>Read path: memory cache, Bloom filter, SSTables.</li><li>Recap with the summary table.</li></ul>
+      <div class="say">"On each node, writes go to a commit log for durability, then to an in-memory cache, which is flushed to immutable sorted SSTables when full. Reads check memory first, then use per-SSTable Bloom filters to skip files that definitely do not have the key. To recap: consistent hashing for scale, replication across data centers for availability, quorums for tunable consistency, vector clocks for conflicts, gossip, hinted handoff and Merkle trees for failures."</div>
+      <div class="say them">"Why a commit log if the data is going into memory anyway?"</div>
+      <div class="say">"Memory is lost on a crash. The commit log is an append-only file, so writing to it is fast, and on restart the node replays it to rebuild the memory cache. Without it, acknowledged writes could disappear."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Claiming a CA distributed system</div>
+      <p>Saying "my system is consistent and available" without addressing partitions shows you have not understood CAP. Partitions will happen; say which property you sacrifice during one.</p>
+    </div>
+    <div class="callout danger"><div class="callout-title">Thinking W = 1 means "write to one server"</div>
+      <p>The write is still sent to all N replicas. W only controls how many acks the coordinator waits for before replying.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Using modulo hashing for partitioning</div>
+      <p><code>hash(key) % n</code> remaps almost every key when n changes. Use consistent hashing, and mention virtual nodes for heterogeneity.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Picking the first N ring positions blindly</div>
+      <p>With virtual nodes, adjacent positions may be the same physical machine. Pick the first N <em>unique</em> servers, ideally in different data centers.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Using wall-clock "last write wins" without saying so</div>
+      <p>Timestamps from different servers can disagree, silently losing data. The book's answer is vector clocks; if you choose last-write-wins instead, call out the trade-off.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Declaring a node dead from one missed ping</div>
+      <p>It may just be a network blip between two nodes. Require multiple independent sources, which gossip provides naturally.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Confusing temporary and permanent failure handling</div>
+      <p>Hinted handoff is for short outages. Merkle-tree anti-entropy is for replicas that are out of sync for longer or permanently. Mention both.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. What are the three guarantees in CAP, and why must a real distributed system always include P?</summary><div><p>Consistency (everyone sees the same data), Availability (every request gets a response), Partition tolerance (keeps working when the network splits). Network failures are unavoidable in practice, so a distributed system must tolerate partitions. The real choice is between C and A during a partition.</p></div></details>
+      <details><summary>2. n3 loses its connection to n1 and n2. Describe what a CP system and an AP system each do.</summary><div><p>CP: blocks writes to n1 and n2 (and becomes unavailable) to avoid inconsistency among the three nodes, like a bank. AP: keeps accepting reads (possibly stale) and writes on n1 and n2, then syncs the data to n3 once the partition is resolved.</p></div></details>
+      <details><summary>3. With N = 3, which W and R give strong consistency? Which configuration optimizes reads?</summary><div><p>Any W + R &gt; 3, for example W = 2, R = 2, because the read set and write set must overlap in at least one replica holding the latest data. R = 1, W = N (= 3) optimizes reads.</p></div></details>
+      <details><summary>4. With W = 1, is the data only stored on one replica?</summary><div><p>No. The coordinator sends the write to all N replicas. W = 1 only means it reports success after the first acknowledgment, which lowers latency but weakens consistency.</p></div></details>
+      <details><summary>5. Version A has clock ([s0,1],[s1,2]) and version B has ([s0,2],[s1,1]). Which one wins?</summary><div><p>Neither. B is ahead on s0, A is ahead on s1, so neither is an ancestor of the other. They are siblings in conflict, and the client must reconcile them.</p></div></details>
+      <details><summary>6. In the book's example, D5 is written by Sx after merging D3 and D4. What is D5's vector clock and why?</summary><div><p>D5([Sx,3],[Sy,1],[Sz,1]). The merged version keeps the highest counters from both parents ([Sx,2],[Sy,1],[Sz,1]), and since Sx handles the write, it increments its own counter from 2 to 3.</p></div></details>
+      <details><summary>7. Why is gossip preferred over all-to-all multicasting for failure detection?</summary><div><p>All-to-all sends heartbeats between every pair of nodes, which becomes inefficient with many servers. Gossip has each node share its membership list with a few random nodes, which spreads information with far fewer messages and is decentralized.</p></div></details>
+      <details><summary>8. A server is down for 2 minutes during a reboot. Which techniques keep writes flowing and bring it back up to date?</summary><div><p>Sloppy quorum: writes use the first W healthy servers on the ring, so a stand-in accepts writes. Hinted handoff: the stand-in keeps them with a hint and pushes them back when the server returns.</p></div></details>
+      <details><summary>9. Two replicas each hold a billion keys. How do Merkle trees avoid sending all of them to compare?</summary><div><p>Keys are grouped into buckets, each bucket is hashed, and hashes are combined up to a root. Compare roots; if they match, done. If not, descend only into children whose hashes differ, until you find the mismatched buckets. Only those buckets are synced, so the transfer is proportional to the differences, not the data size.</p></div></details>
+      <details><summary>10. A read misses the memory cache. How does the node avoid opening every SSTable?</summary><div><p>It checks each SSTable's Bloom filter. If the filter says "definitely not", that SSTable is skipped. Only SSTables whose filter says "maybe" are read. A false positive just costs one extra read; there are no false negatives.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>API: <code>put(key, value)</code>, <code>get(key)</code>. Requirements: pairs &lt;10 KB, big data, high availability, scalability, auto scaling, tunable consistency, low latency.</li>
+      <li>Single server: in-memory hash table + compression + hot data in memory. Runs out of space fast.</li>
+      <li>CAP: pick two of C, A, P. P is mandatory, so CP (bank: block writes) or AP (accept writes, sync later). CA does not exist in practice.</li>
+      <li>Partition with consistent hashing: even spread, minimal movement, automatic scaling, virtual nodes for heterogeneity.</li>
+      <li>Replicate: walk clockwise, first N unique servers, in distinct data centers.</li>
+      <li>Quorum: coordinator waits for W write acks / R read responses. W + R &gt; N = strong; R=1,W=N = fast reads; W=1,R=N = fast writes.</li>
+      <li>Consistency models: strong, weak, eventual. This design: eventual, like Dynamo and Cassandra.</li>
+      <li>Vector clocks: <code>[server, counter]</code> per version. All counters &gt;= means ancestor; otherwise siblings (conflict, client resolves). Downsides: client complexity, size growth (threshold).</li>
+      <li>Failure detection: gossip with heartbeat counters; mark down if not increased for a period, confirmed by others.</li>
+      <li>Temporary failures: sloppy quorum + hinted handoff. Permanent: anti-entropy with Merkle trees (sync only differing buckets). Data center outage: cross-DC replication.</li>
+      <li>Write path: commit log, then memory cache, then flush to SSTable when full.</li>
+      <li>Read path: memory cache; on miss, Bloom filter picks candidate SSTables; read them; return.</li>
+    </ul></div>
+  </section>
+
+</main>
+<script src="assets/app.js"></script></body></html>

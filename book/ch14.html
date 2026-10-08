@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 14: Design YouTube</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="14">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 14</div><h1>Design YouTube</h1>
+    <p class="lead">In this chapter you design a video-sharing service like YouTube: people upload videos, and millions of others watch them smoothly on phones, laptops and TVs. The interesting parts are what happens to a video after it is uploaded (transcoding), how it reaches viewers fast (CDNs and streaming protocols), and how to keep the bill from exploding.</p>
+    <div class="meta"><span class="tag">~40 min read</span><span class="tag">Advanced</span><span class="tag">Prerequisites: Ch 1 (scaling), Ch 2 (estimation), Ch 3 (framework), CDN and message queue basics</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>On the surface YouTube looks simple: a creator uploads a video, and viewers press play. Under the hood, it is one of the biggest systems on Earth. The book opens with these numbers to show the scale:</p>
+    <div class="stats">
+      <div class="stat"><b>2 billion</b><span>monthly active users</span></div>
+      <div class="stat"><b>5 billion</b><span>videos watched per day</span></div>
+      <div class="stat"><b>73%</b><span>of US adults use YouTube</span></div>
+      <div class="stat"><b>50 million</b><span>creators on YouTube</span></div>
+      <div class="stat"><b>$15.1 billion</b><span>ad revenue in 2019</span></div>
+      <div class="stat"><b>37%</b><span>of mobile internet traffic</span></div>
+      <div class="stat"><b>80</b><span>languages available</span></div>
+    </div>
+    <p>A video service has two very different jobs:</p>
+    <ul>
+      <li><strong>Upload path</strong> &mdash; accept a big raw file (up to 1 GB here), store it safely, and convert it into many formats and qualities so every device can play it. This is heavy, slow, CPU-hungry work that happens <em>once</em> per video.</li>
+      <li><strong>Watch path</strong> &mdash; deliver those converted files to viewers all over the world, quickly and without buffering. This happens <em>millions of times</em> per video and is mostly about bandwidth and money.</li>
+    </ul>
+    <p>Most of this chapter is about the upload path, especially <strong>transcoding</strong>, because that is where the clever engineering lives. For the watch path, we mostly lean on an existing <strong>CDN</strong> (Content Delivery Network).</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Think of a film studio and a chain of cinemas. A director hands over one giant master reel (the raw upload). The studio's lab makes many copies: a 4K print for premium theatres, a smaller version for airplanes, a dubbed version, a trailer, a poster image (transcoding, thumbnails). Then trucks deliver those copies to local cinemas in every city (the CDN), so audiences never have to travel to the studio. The lab work is expensive but happens once; the delivery happens every night in every town, so you want the copies stored close to the audience.</p>
+    </div>
+    <div class="callout key"><div class="callout-title">What makes this problem special</div>
+      <p>Unlike a chat app or URL shortener, the data here is <em>huge</em> (hundreds of megabytes per item), processing is <em>expensive</em> (converting video takes lots of CPU), and the main cost is <em>bandwidth</em>. Good answers talk about money as much as about speed.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>DAU / MAU</dt><dd>Daily / monthly active users: how many distinct people use the product in a day or month.</dd>
+      <dt>Blob storage</dt><dd>"Binary Large Object" storage. A service (like Amazon S3) that stores big files of any type cheaply and reliably. You put a file in, you get a key/URL back.</dd>
+      <dt>CDN (Content Delivery Network)</dt><dd>A worldwide network of servers ("edge servers") that keep copies of files close to users, so downloads are fast. Examples: Amazon CloudFront, Akamai.</dd>
+      <dt>Edge server</dt><dd>A CDN server located in or near a user's city. The closest one serves the user.</dd>
+      <dt>Metadata</dt><dd>"Data about data." For a video: title, description, uploader, URL, size, resolution, upload time, view counts. Small, structured, stored in a database.</dd>
+      <dt>Transcoding (encoding)</dt><dd>Converting a video from one format/quality into other formats/qualities, for example turning one big raw file into 360p, 720p and 1080p MP4 files.</dd>
+      <dt>Resolution</dt><dd>How many pixels are in each frame, written by height: 360p, 480p, 720p (HD), 1080p (Full HD), 4K.</dd>
+      <dt>Bitrate</dt><dd>How many bits are used to represent one second of video. Higher bitrate means better quality but bigger files and more bandwidth needed.</dd>
+      <dt>Adaptive bitrate streaming</dt><dd>The player automatically switches between lower and higher quality versions as the viewer's network gets slower or faster.</dd>
+      <dt>Container</dt><dd>The "box" file format that holds video, audio and metadata together. Recognised by the file extension: .avi, .mov, .mp4.</dd>
+      <dt>Codec</dt><dd>"Coder-decoder": the compression algorithm that shrinks the video while keeping quality. Common ones: H.264, VP9, HEVC.</dd>
+      <dt>Streaming</dt><dd>Playing a video while it is still arriving, piece by piece, instead of waiting for the whole file to download first.</dd>
+      <dt>Streaming protocol</dt><dd>A standard way of splitting video into pieces and sending it to players. Examples: MPEG-DASH, Apple HLS, Microsoft Smooth Streaming, Adobe HDS.</dd>
+      <dt>GOP (Group of Pictures)</dt><dd>A small group of video frames in a fixed order, usually a few seconds long. Each GOP can be played (and processed) on its own, which makes it a natural "chunk" for splitting video.</dd>
+      <dt>DAG (Directed Acyclic Graph)</dt><dd>A set of tasks connected by arrows that show "this must happen before that," with no loops. Used to describe a video processing pipeline.</dd>
+      <dt>Message queue</dt><dd>A buffer where one component drops messages (jobs) and another picks them up later. It decouples components so they don't wait on each other.</dd>
+      <dt>Pre-signed URL</dt><dd>A temporary URL with built-in permission that lets a client upload (or download) directly to a storage bucket. Amazon S3 term; Azure calls it a "Shared Access Signature."</dd>
+      <dt>DRM (Digital Rights Management)</dt><dd>Technology that stops people from copying or playing videos without permission. Examples: Apple FairPlay, Google Widevine, Microsoft PlayReady.</dd>
+      <dt>AES encryption</dt><dd>A standard, strong encryption algorithm. Encrypted video can only be decrypted by authorised players.</dd>
+      <dt>Watermark</dt><dd>A logo or text overlaid on the video to show ownership.</dd>
+      <dt>Thumbnail</dt><dd>The small preview image shown for a video in lists and search results.</dd>
+      <dt>Long-tail distribution</dt><dd>A pattern where a few items are hugely popular and a very long list of items get only a little attention each.</dd>
+      <dt>ISP (Internet Service Provider)</dt><dd>The company that gives users internet access (Comcast, AT&amp;T, Verizon...).</dd>
+      <dt>Stateless server</dt><dd>A server that keeps no user-specific data between requests, so any copy of it can handle any request.</dd>
+      <dt>Replica / master-slave</dt><dd>Copies of a database or cache. The master takes writes; slaves (replicas) copy it and serve reads. If the master dies, a slave can be promoted.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="step-1-requirements">Step 1: Understand the problem and scope</h2>
+    <p>"Design YouTube" could mean a hundred features: comments, likes, recommendations, subscriptions, live streaming, ads... You cannot build all of that in 45 minutes. So you start by asking questions. Here is the conversation from the book:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th><th>What it tells you</th></tr>
+      <tr><td>What features are important?</td><td>Ability to upload a video and watch a video.</td><td>Focus on two flows: upload and stream.</td></tr>
+      <tr><td>What clients do we need to support?</td><td>Mobile apps, web browsers, and smart TV.</td><td>Many screen sizes and formats: we need multiple encodings.</td></tr>
+      <tr><td>How many daily active users?</td><td>5 million.</td><td>Basis for estimation.</td></tr>
+      <tr><td>Average daily time spent on the product?</td><td>30 minutes.</td><td>Users watch a lot; streaming bandwidth matters.</td></tr>
+      <tr><td>Do we need to support international users?</td><td>Yes, a large percentage are international.</td><td>Use a global CDN; consider regional popularity.</td></tr>
+      <tr><td>What video resolutions are supported?</td><td>Accept most video resolutions and formats.</td><td>Transcoding is required.</td></tr>
+      <tr><td>Is encryption required?</td><td>Yes.</td><td>Think about DRM / AES / secure uploads.</td></tr>
+      <tr><td>Any file size requirement?</td><td>Focus on small and medium-sized videos. Max size is 1 GB.</td><td>Bounded upload size; still big enough to need chunking.</td></tr>
+      <tr><td>Can we leverage existing cloud infrastructure from Amazon, Google or Microsoft?</td><td>Yes. Building everything from scratch is unrealistic for most companies.</td><td>Use blob storage and CDN services.</td></tr>
+    </table></div>
+    <h3>Features we will design</h3>
+    <div class="cards">
+      <div class="card green"><h4>Fast uploads</h4><p>Videos should upload quickly, even large ones.</p></div>
+      <div class="card sky"><h4>Smooth streaming</h4><p>Playback without constant buffering.</p></div>
+      <div class="card yellow"><h4>Change quality</h4><p>Viewers can switch between 360p, 720p, 1080p and so on.</p></div>
+      <div class="card pink"><h4>Low infrastructure cost</h4><p>Bandwidth and storage are expensive; keep them under control.</p></div>
+      <div class="card purple"><h4>High availability, scalability, reliability</h4><p>The service stays up, grows with users, and never loses videos.</p></div>
+      <div class="card teal"><h4>Clients</h4><p>Mobile apps, web browser, and smart TV.</p></div>
+    </div>
+
+    <h3>Back-of-the-envelope estimation</h3>
+    <p>Estimates tell us what will be expensive. The book makes these assumptions:</p>
+    <ul>
+      <li>5 million daily active users (DAU).</li>
+      <li>Each user watches 5 videos per day.</li>
+      <li>10% of users upload 1 video per day.</li>
+      <li>Average video size is 300 MB.</li>
+    </ul>
+    <p><strong>Daily new storage.</strong> Work it out step by step:</p>
+    <ol class="steps">
+      <li><strong>Uploaders per day</strong> 5,000,000 &times; 10% = 500,000 people upload one video each.</li>
+      <li><strong>Bytes per day</strong> 500,000 videos &times; 300 MB = 150,000,000 MB.</li>
+      <li><strong>Convert units</strong> 150,000,000 MB = 150,000 GB = <strong>150 TB per day</strong> of new storage.</li>
+    </ol>
+    <pre><code>Daily storage = 5 million x 10% x 300 MB = 150 TB</code></pre>
+    <p><strong>CDN cost.</strong> When a CDN serves a video, it charges for the data it transfers out. The book uses Amazon CloudFront's US price of about $0.02 per GB.</p>
+    <ol class="steps">
+      <li><strong>Videos watched per day</strong> 5,000,000 users &times; 5 videos = 25,000,000 views.</li>
+      <li><strong>Data served</strong> 25,000,000 &times; 0.3 GB = 7,500,000 GB per day.</li>
+      <li><strong>Cost</strong> 7,500,000 GB &times; $0.02 = <strong>$150,000 per day</strong>.</li>
+    </ol>
+    <pre><code>Daily CDN cost = 5 million x 5 videos x 0.3 GB x $0.02 = $150,000</code></pre>
+    <div class="stats">
+      <div class="stat"><b>150 TB</b><span>new storage per day</span></div>
+      <div class="stat"><b>25 million</b><span>views per day</span></div>
+      <div class="stat"><b>$150,000</b><span>CDN cost per day</span></div>
+      <div class="stat"><b>~$55M</b><span>CDN cost per year at that rate</span></div>
+    </div>
+    <div class="callout warn"><div class="callout-title">Why this number matters</div>
+      <p>$150,000 per day is a huge bill, and it is just for serving videos from the CDN. This estimate is the reason the deep dive later spends a whole section on <strong>cost-saving optimizations</strong>. In an interview, pointing out "the CDN is our biggest cost" shows real judgement.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step-2-high-level-design">Step 2: High-level design</h2>
+    <p>First, a key decision: <strong>we do not build our own CDN or blob storage.</strong> The interviewer said we can use existing cloud services, and that is what real companies do. The book points out that even giants rely on others: <strong>Netflix uses Amazon's cloud (AWS)</strong>, and <strong>Facebook uses Akamai's CDN</strong>. Building a global CDN takes years and enormous money; in an interview, choosing the right existing technology is the better use of your time.</p>
+    <p>At the highest level, the system has three components:</p>
+    <div class="diagram"><div class="diagram-title">The three main components</div>
+      <svg class="dg" viewBox="0 0 640 260">
+        <defs><marker id="yt-m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="250" y="20" width="140" height="56" class="a"/>
+          <text x="320" y="45">Client</text><text x="320" y="63" class="sm">phone / PC / TV</text>
+          <rect x="60" y="170" width="170" height="60" class="g"/>
+          <text x="145" y="196">CDN</text><text x="145" y="214" class="sm">stores + streams videos</text>
+          <rect x="410" y="170" width="170" height="60" class="s"/>
+          <text x="495" y="196">API servers</text><text x="495" y="214" class="sm">everything else</text>
+          <line x1="285" y1="78" x2="165" y2="166" marker-end="url(#yt-m1)"/>
+          <text x="180" y="120" class="sm">streaming video</text>
+          <line x1="355" y1="78" x2="475" y2="166" marker-end="url(#yt-m1)"/>
+          <text x="470" y="120" class="sm">upload, metadata,</text>
+          <text x="470" y="135" class="sm">feed, sign-up...</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">The client talks to two places. Video bytes come from the CDN. Everything else (recommendations, upload URLs, metadata updates, sign-up) goes through API servers.</div>
+    </div>
+    <dl class="terms">
+      <dt>Client</dt><dd>The YouTube app on a phone, a web browser on a computer, or a smart TV app.</dd>
+      <dt>CDN</dt><dd>Videos are stored in the CDN. When you press play, the video streams from the CDN edge server nearest to you.</dd>
+      <dt>API servers</dt><dd>Everything except streaming: feed recommendation, generating video upload URLs, updating the metadata database and cache, user sign-up, and so on.</dd>
+    </dl>
+    <p>The interviewer wants to dig into two flows, so we look at each in turn: <strong>video uploading</strong> and <strong>video streaming</strong>.</p>
+  </section>
+
+  <section>
+    <h2 id="video-uploading-flow">Video uploading flow</h2>
+    <p>Here is the full upload architecture from the book. Don't panic at the number of boxes; we'll go through them one by one.</p>
+    <div class="diagram"><div class="diagram-title">Video uploading architecture</div>
+      <svg class="dg" viewBox="0 0 760 470">
+        <defs><marker id="yt-m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="20" y="200" width="90" height="50" class="a"/><text x="65" y="230">User</text>
+          <rect x="160" y="40" width="130" height="44"/><text x="225" y="67">Load balancer</text>
+          <rect x="340" y="40" width="120" height="44" class="s"/><text x="400" y="67">API servers</text>
+          <rect x="520" y="16" width="140" height="40" class="y"/><text x="590" y="41">Metadata cache</text>
+          <rect x="520" y="72" width="140" height="40" class="y"/><text x="590" y="97">Metadata DB</text>
+          <rect x="160" y="200" width="140" height="50" class="g"/><text x="230" y="222">Original</text><text x="230" y="240" class="sm">storage (blob)</text>
+          <rect x="340" y="200" width="140" height="50" class="p"/><text x="410" y="222">Transcoding</text><text x="410" y="240" class="sm">servers</text>
+          <rect x="530" y="200" width="140" height="50" class="g"/><text x="600" y="222">Transcoded</text><text x="600" y="240" class="sm">storage (blob)</text>
+          <rect x="530" y="330" width="140" height="44" class="g"/><text x="600" y="357">CDN</text>
+          <rect x="340" y="330" width="140" height="44" class="y"/><text x="410" y="357">Completion queue</text>
+          <rect x="340" y="410" width="140" height="44" class="s"/><text x="410" y="437">Completion handler</text>
+          <!-- user to lb (metadata) -->
+          <path d="M65,198 L65,62 L156,62" marker-end="url(#yt-m2)"/>
+          <text x="100" y="54" class="sm">b: metadata</text>
+          <line x1="292" y1="62" x2="336" y2="62" marker-end="url(#yt-m2)"/>
+          <line x1="462" y1="55" x2="516" y2="38" marker-end="url(#yt-m2)"/>
+          <line x1="462" y1="70" x2="516" y2="90" marker-end="url(#yt-m2)"/>
+          <!-- user to original storage -->
+          <line x1="112" y1="225" x2="156" y2="225" marker-end="url(#yt-m2)"/>
+          <text x="132" y="215" class="sm">1</text>
+          <line x1="302" y1="225" x2="336" y2="225" marker-end="url(#yt-m2)"/>
+          <text x="319" y="215" class="sm">2</text>
+          <line x1="482" y1="225" x2="526" y2="225" marker-end="url(#yt-m2)"/>
+          <text x="504" y="215" class="sm">3a</text>
+          <line x1="600" y1="252" x2="600" y2="326" marker-end="url(#yt-m2)"/>
+          <text x="625" y="292" class="sm">3a.1</text>
+          <line x1="410" y1="252" x2="410" y2="326" marker-end="url(#yt-m2)"/>
+          <text x="428" y="292" class="sm">3b</text>
+          <line x1="410" y1="376" x2="410" y2="406" marker-end="url(#yt-m2)"/>
+          <text x="440" y="396" class="sm">3b.1</text>
+          <path d="M482,432 L720,432 L720,90 L664,90" marker-end="url(#yt-m2)"/>
+          <text x="736" y="270" class="sm">3b.1.a/b</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Numbers 1 to 3b show flow a (uploading the actual video). The "b: metadata" path shows flow b (updating metadata), which runs in parallel. The completion handler writes the final results back to the metadata DB and cache.</div>
+    </div>
+    <h3>The components</h3>
+    <dl class="terms">
+      <dt>User</dt><dd>Watches YouTube on a computer, phone or smart TV.</dd>
+      <dt>Load balancer</dt><dd>Spreads incoming requests evenly across API servers.</dd>
+      <dt>API servers</dt><dd>Handle all user requests except video streaming.</dd>
+      <dt>Metadata DB</dt><dd>Stores video metadata. It is sharded and replicated to meet performance and high-availability needs.</dd>
+      <dt>Metadata cache</dt><dd>Caches video metadata and user objects for faster reads.</dd>
+      <dt>Original storage</dt><dd>A blob storage system holding the original uploaded videos.</dd>
+      <dt>Transcoding servers</dt><dd>Convert videos into multiple formats (MPEG, HLS, etc.) and resolutions so they play well on different devices and bandwidths.</dd>
+      <dt>Transcoded storage</dt><dd>Blob storage holding the transcoded output files.</dd>
+      <dt>CDN</dt><dd>Caches the transcoded videos. When you click play, the video is streamed from the CDN.</dd>
+      <dt>Completion queue</dt><dd>A message queue holding "transcoding finished" events.</dd>
+      <dt>Completion handler</dt><dd>A set of workers that pull events from the completion queue and update the metadata cache and database.</dd>
+    </dl>
+    <p>Uploading is broken into two processes that run <strong>in parallel</strong>:</p>
+    <h3>Flow a: upload the actual video</h3>
+    <ol class="steps">
+      <li><strong>1. Upload to original storage</strong> The client sends the raw video file to original (blob) storage.</li>
+      <li><strong>2. Fetch for transcoding</strong> Transcoding servers pull the video from original storage and start converting it.</li>
+      <li><strong>3. When transcoding finishes, two things happen in parallel</strong>
+        <ul>
+          <li><strong>3a.</strong> Transcoded videos are sent to transcoded storage.
+            <ul><li><strong>3a.1.</strong> Transcoded videos are distributed to the CDN.</li></ul></li>
+          <li><strong>3b.</strong> A transcoding-completion event is put into the completion queue.
+            <ul><li><strong>3b.1.</strong> Completion handler workers continuously pull events from the queue.</li>
+              <li><strong>3b.1.a / 3b.1.b.</strong> The completion handler updates the metadata database and the cache (for example: "video 123 is ready in 360p, 720p, 1080p; here are the URLs").</li></ul></li>
+        </ul></li>
+      <li><strong>4. Done</strong> API servers tell the client the video is successfully uploaded and ready for streaming.</li>
+    </ol>
+    <h3>Flow b: update the metadata</h3>
+    <p>While the big file is uploading, the client <strong>in parallel</strong> sends a small request with the video's metadata (file name, size, format, title, description...). This goes through the load balancer to the API servers, which write it into the metadata cache and database.</p>
+    <div class="diagram"><div class="diagram-title">Flow b: metadata update (runs at the same time as the file upload)</div>
+      <div class="flow">
+        <div class="node accent">User<small>sends title, size, format</small></div>
+        <div class="arrow">→</div>
+        <div class="node">Load balancer</div>
+        <div class="arrow">→</div>
+        <div class="node sky">API servers</div>
+        <div class="arrow">→<small>write</small></div>
+        <div class="node yellow">Metadata cache</div>
+        <div class="arrow">+</div>
+        <div class="node db yellow">Metadata DB</div>
+      </div>
+      <div class="diagram-caption">Metadata is tiny compared to the video, so it goes through the normal API path. Doing it in parallel means the user can type a title while the file is still uploading.</div>
+    </div>
+    <div class="callout tip"><div class="callout-title">Why a queue for completion events?</div>
+      <p>Transcoding servers should just transcode. If they had to also update the database directly, a slow or broken database would block transcoding. Dropping a "done" message into a queue lets the transcoders move on immediately, and the completion handlers update the database at their own pace. This is <strong>decoupling</strong>, a theme you will see again in the optimizations.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="video-streaming-flow">Video streaming flow</h2>
+    <p>When you watch a YouTube video, it starts playing almost immediately; you don't wait for the whole file to download. That is the difference between downloading and streaming:</p>
+    <div class="cards">
+      <div class="card red"><h4>Downloading</h4><p>The whole file is copied to your device first. Only then can you watch. A 300 MB video on a slow connection could take minutes before anything plays.</p></div>
+      <div class="card green"><h4>Streaming</h4><p>Your device continuously receives small pieces of the video from remote servers and plays them as they arrive. Playback starts in seconds; the rest keeps arriving in the background.</p></div>
+    </div>
+    <p>To stream, client and server must agree on <strong>how</strong> video is chopped up and sent. That agreement is a <strong>streaming protocol</strong>. Popular ones:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Protocol</th><th>From</th><th>Notes</th></tr>
+      <tr><td>MPEG-DASH</td><td>MPEG group (open standard)</td><td>"Dynamic Adaptive Streaming over HTTP." MPEG = Moving Picture Experts Group.</td></tr>
+      <tr><td>Apple HLS</td><td>Apple</td><td>"HTTP Live Streaming." Required on many Apple devices.</td></tr>
+      <tr><td>Microsoft Smooth Streaming</td><td>Microsoft</td><td>Adaptive streaming over HTTP.</td></tr>
+      <tr><td>Adobe HTTP Dynamic Streaming (HDS)</td><td>Adobe</td><td>Adaptive streaming over HTTP.</td></tr>
+    </table></div>
+    <p>You don't need to know the details of each. What matters: different protocols support different video encodings and playback players, so <strong>when designing a video streaming service you must pick the right protocol(s) for your use cases</strong>. That is one more reason we transcode into multiple formats.</p>
+    <div class="diagram"><div class="diagram-title">Videos stream from the nearest CDN edge server</div>
+      <svg class="dg" viewBox="0 0 680 260">
+        <defs><marker id="yt-m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="250" y="20" width="180" height="50" class="g"/><text x="340" y="43">Transcoded storage</text><text x="340" y="60" class="sm">origin copy</text>
+          <rect x="40" y="120" width="150" height="46" class="g"/><text x="115" y="148">Edge: Europe</text>
+          <rect x="265" y="120" width="150" height="46" class="g"/><text x="340" y="148">Edge: US East</text>
+          <rect x="490" y="120" width="150" height="46" class="g"/><text x="565" y="148">Edge: India</text>
+          <line x1="300" y1="72" x2="140" y2="116" marker-end="url(#yt-m3)"/>
+          <line x1="340" y1="72" x2="340" y2="116" marker-end="url(#yt-m3)"/>
+          <line x1="380" y1="72" x2="540" y2="116" marker-end="url(#yt-m3)"/>
+          <rect x="55" y="200" width="120" height="40" class="a"/><text x="115" y="225">Viewer, Paris</text>
+          <rect x="280" y="200" width="120" height="40" class="a"/><text x="340" y="225">Viewer, NYC</text>
+          <rect x="505" y="200" width="120" height="40" class="a"/><text x="565" y="225">Viewer, Delhi</text>
+          <line x1="115" y1="168" x2="115" y2="196" marker-end="url(#yt-m3)"/>
+          <line x1="340" y1="168" x2="340" y2="196" marker-end="url(#yt-m3)"/>
+          <line x1="565" y1="168" x2="565" y2="196" marker-end="url(#yt-m3)"/>
+        </g>
+      </svg>
+      <div class="diagram-caption">Each viewer streams from the edge server closest to them, so the data travels a short distance and latency is very low. The origin copy is only fetched once per edge.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="video-transcoding">Step 3 deep dive: video transcoding</h2>
+    <p>When you record a video, your phone or camera saves it in a particular format. If you want it to play smoothly on <em>every</em> other device, it must be converted (encoded) into compatible bitrates and formats.</p>
+    <h3>What is bitrate?</h3>
+    <p><strong>Bitrate</strong> is the rate at which bits are processed over time, usually measured in kilobits or megabits per second. A higher bitrate generally means higher video quality. High-bitrate streams need more processing power and fast internet speed.</p>
+    <div class="callout info"><div class="callout-title">Concrete example</div>
+      <p>Imagine the same 10-minute clip encoded twice. At a low bitrate, it might be tens of megabytes and look a bit blurry on a big TV, but it plays fine on a weak mobile signal. At a high bitrate, it might be several hundred megabytes and look crisp, but it will buffer on a slow connection. Neither is "right" &mdash; we want <em>both</em>, and let the player choose.</p>
+    </div>
+    <h3>Why transcoding is important</h3>
+    <ol class="steps">
+      <li><strong>Raw video is huge</strong> Raw video consumes large amounts of storage. An hour-long high-definition video recorded at 60 frames per second can take up hundreds of GB. Compressing it saves storage and bandwidth.</li>
+      <li><strong>Compatibility</strong> Many devices and browsers only support certain types of video formats. Encoding into several formats makes sure everyone can play it.</li>
+      <li><strong>Adapt to network conditions</strong> To give users high-quality video while keeping playback smooth, deliver higher resolution to users with high bandwidth and lower resolution to users with low bandwidth.</li>
+      <li><strong>Quality switching mid-video</strong> Network conditions can change, especially on mobile. Switching quality automatically or manually as bandwidth changes is essential for a smooth experience. Having multiple versions ready makes this possible.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Adaptive bitrate: the player switches quality as bandwidth changes</div>
+      <svg class="dg" viewBox="0 0 680 230">
+        <g text-anchor="middle">
+          <text x="50" y="45" class="sm">1080p</text>
+          <text x="50" y="95" class="sm">720p</text>
+          <text x="50" y="145" class="sm">360p</text>
+          <line x1="90" y1="40" x2="650" y2="40" stroke-dasharray="3 4"/>
+          <line x1="90" y1="90" x2="650" y2="90" stroke-dasharray="3 4"/>
+          <line x1="90" y1="140" x2="650" y2="140" stroke-dasharray="3 4"/>
+          <rect x="100" y="80" width="100" height="20" class="s"/>
+          <rect x="210" y="30" width="100" height="20" class="g"/>
+          <rect x="320" y="30" width="100" height="20" class="g"/>
+          <rect x="430" y="130" width="100" height="20" class="r"/>
+          <rect x="540" y="80" width="100" height="20" class="s"/>
+          <text x="150" y="185" class="sm">start: medium</text>
+          <text x="315" y="185" class="sm">Wi-Fi is fast: go HD</text>
+          <text x="480" y="185" class="sm">train tunnel: drop</text>
+          <text x="590" y="185" class="sm">recovering</text>
+          <text x="370" y="215">Each block is a few-second segment of the same video</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Because the video is stored at several bitrates, the player can fetch each next segment at whatever quality the network can currently handle. The viewer sees a quality dip instead of a frozen screen.</div>
+    </div>
+    <h3>Encoding formats: container + codec</h3>
+    <p>Many encoding formats exist, but most contain two parts:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Container</h4><p>Like a basket that holds the video file, audio, and metadata. You can usually tell the container from the file extension: <code>.avi</code>, <code>.mov</code>, <code>.mp4</code>.</p></div>
+      <div class="card purple"><h4>Codecs</h4><p>Compression and decompression algorithms that reduce video size while preserving quality. The most used codecs are <strong>H.264</strong>, <strong>VP9</strong>, and <strong>HEVC</strong>.</p></div>
+    </div>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>The container is a shipping box with a label (".mp4"). The codec is the way you folded and vacuum-packed the clothes inside so they take less space. Two boxes can look the same from outside but use different packing methods; the receiver needs to know the packing method (codec) to unpack it.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="dag-model">The DAG model for transcoding</h2>
+    <p>Transcoding is computationally expensive and slow. And different creators want different processing: some want a watermark on their video, some upload their own thumbnail, some upload HD video while others don't.</p>
+    <p>To support many different processing pipelines while keeping lots of work running in parallel, we need an abstraction: a way for client programmers to <strong>define what tasks to run</strong>. Facebook's streaming video engine uses a <strong>directed acyclic graph (DAG)</strong> programming model, which defines tasks in stages so they can be executed sequentially or in parallel. We use a similar model.</p>
+    <p>Break "DAG" down:</p>
+    <ul>
+      <li><strong>Graph</strong>: boxes (tasks) connected by lines.</li>
+      <li><strong>Directed</strong>: the lines are arrows; "A &rarr; B" means A must finish before B starts.</li>
+      <li><strong>Acyclic</strong>: there are no loops, so the pipeline always finishes.</li>
+    </ul>
+    <p>The original video is split into <strong>video</strong>, <strong>audio</strong>, and <strong>metadata</strong>. Each part then goes through its own tasks:</p>
+    <div class="diagram"><div class="diagram-title">DAG for video transcoding</div>
+      <svg class="dg" viewBox="0 0 760 400">
+        <defs><marker id="yt-m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="10" y="175" width="110" height="50" class="a"/><text x="65" y="198">Original</text><text x="65" y="215" class="sm">video</text>
+          <rect x="170" y="60" width="100" height="40" class="s"/><text x="220" y="85">Video</text>
+          <rect x="170" y="180" width="100" height="40" class="p"/><text x="220" y="205">Audio</text>
+          <rect x="170" y="300" width="100" height="40" class="y"/><text x="220" y="325">Metadata</text>
+          <line x1="122" y1="190" x2="166" y2="85" marker-end="url(#yt-m4)"/>
+          <line x1="122" y1="200" x2="166" y2="200" marker-end="url(#yt-m4)"/>
+          <line x1="122" y1="210" x2="166" y2="318" marker-end="url(#yt-m4)"/>
+          <rect x="320" y="15" width="110" height="34"/><text x="375" y="37">Inspection</text>
+          <rect x="320" y="65" width="110" height="34"/><text x="375" y="87">Video encoding</text>
+          <rect x="320" y="115" width="110" height="34"/><text x="375" y="137">Thumbnail</text>
+          <rect x="320" y="165" width="110" height="34"/><text x="375" y="187">Watermark</text>
+          <rect x="320" y="235" width="110" height="34" class="p"/><text x="375" y="257">Audio encoding</text>
+          <line x1="272" y1="75" x2="316" y2="34" marker-end="url(#yt-m4)"/>
+          <line x1="272" y1="80" x2="316" y2="82" marker-end="url(#yt-m4)"/>
+          <line x1="272" y1="85" x2="316" y2="130" marker-end="url(#yt-m4)"/>
+          <line x1="272" y1="92" x2="316" y2="180" marker-end="url(#yt-m4)"/>
+          <line x1="272" y1="205" x2="316" y2="250" marker-end="url(#yt-m4)"/>
+          <rect x="490" y="15" width="90" height="28" class="g"/><text x="535" y="34">360p.mp4</text>
+          <rect x="490" y="51" width="90" height="28" class="g"/><text x="535" y="70">480p.mp4</text>
+          <rect x="490" y="87" width="90" height="28" class="g"/><text x="535" y="106">720p.mp4</text>
+          <rect x="490" y="123" width="90" height="28" class="g"/><text x="535" y="142">1080p.mp4</text>
+          <rect x="490" y="159" width="90" height="28" class="g"/><text x="535" y="178">4k.mp4</text>
+          <line x1="432" y1="80" x2="486" y2="29" marker-end="url(#yt-m4)"/>
+          <line x1="432" y1="81" x2="486" y2="65" marker-end="url(#yt-m4)"/>
+          <line x1="432" y1="82" x2="486" y2="101" marker-end="url(#yt-m4)"/>
+          <line x1="432" y1="83" x2="486" y2="137" marker-end="url(#yt-m4)"/>
+          <line x1="432" y1="84" x2="486" y2="172" marker-end="url(#yt-m4)"/>
+          <rect x="630" y="175" width="120" height="50" class="a"/><text x="690" y="198">Assemble</text><text x="690" y="215" class="sm">encoded output</text>
+          <path d="M582,100 L610,100 L610,190 L626,195" marker-end="url(#yt-m4)"/>
+          <path d="M432,132 L600,190 L626,198" marker-end="url(#yt-m4)"/>
+          <line x1="432" y1="182" x2="626" y2="200" marker-end="url(#yt-m4)"/>
+          <line x1="432" y1="252" x2="626" y2="208" marker-end="url(#yt-m4)"/>
+          <line x1="272" y1="320" x2="626" y2="215" marker-end="url(#yt-m4)"/>
+        </g>
+      </svg>
+      <div class="diagram-caption">The original is split into video, audio and metadata. The video branch runs inspection, encoding to several resolutions, thumbnail generation and watermarking. The audio branch is encoded separately. At the end, all outputs are combined into the final encoded result.</div>
+    </div>
+    <p>Tasks that can be applied on a video file:</p>
+    <dl class="terms">
+      <dt>Inspection</dt><dd>Make sure videos have good quality and are not malformed (corrupted or broken).</dd>
+      <dt>Video encodings</dt><dd>Videos are converted to support different resolutions, codecs, bitrates, etc. For example, 360p.mp4, 480p.mp4, 720p.mp4, 1080p.mp4, 4k.mp4.</dd>
+      <dt>Thumbnail</dt><dd>Thumbnails can be uploaded by a user or automatically generated by the system.</dd>
+      <dt>Watermark</dt><dd>An image overlay on top of the video containing identifying information about the video.</dd>
+      <dt>Audio encoding</dt><dd>Compressing and converting the audio track.</dd>
+    </dl>
+    <div class="callout key"><div class="callout-title">Why the DAG is powerful</div>
+      <p>The DAG makes the pipeline <strong>configurable</strong> (each creator's video can get a different graph, e.g. with or without watermark) and <strong>parallel</strong> (anything without an arrow between them, like "encode 720p" and "make thumbnail", can run at the same time on different machines).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="transcoding-architecture">Video transcoding architecture</h2>
+    <p>Who actually runs the DAG? The book proposes this architecture, which uses cloud services as building blocks:</p>
+    <div class="diagram"><div class="diagram-title">Video transcoding architecture</div>
+      <svg class="dg" viewBox="0 0 760 270">
+        <defs><marker id="yt-m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="10" y="40" width="100" height="50" class="a"/><text x="60" y="62">Original</text><text x="60" y="79" class="sm">video</text>
+          <rect x="140" y="40" width="110" height="50" class="s"/><text x="195" y="70">Preprocessor</text>
+          <rect x="280" y="40" width="120" height="50" class="s"/><text x="340" y="62">DAG</text><text x="340" y="79" class="sm">scheduler</text>
+          <rect x="430" y="40" width="120" height="50" class="s"/><text x="490" y="62">Resource</text><text x="490" y="79" class="sm">manager</text>
+          <rect x="580" y="40" width="160" height="50" class="p"/><text x="660" y="62">Task workers</text><text x="660" y="79" class="sm">encode, watermark...</text>
+          <rect x="300" y="170" width="220" height="50" class="y"/><text x="410" y="192">Temporary storage</text><text x="410" y="209" class="sm">cache / blob</text>
+          <rect x="580" y="170" width="160" height="50" class="g"/><text x="660" y="192">Encoded video</text><text x="660" y="209" class="sm">final output</text>
+          <line x1="112" y1="65" x2="136" y2="65" marker-end="url(#yt-m5)"/>
+          <line x1="252" y1="65" x2="276" y2="65" marker-end="url(#yt-m5)"/>
+          <line x1="402" y1="65" x2="426" y2="65" marker-end="url(#yt-m5)"/>
+          <line x1="552" y1="65" x2="576" y2="65" marker-end="url(#yt-m5)"/>
+          <line x1="660" y1="92" x2="660" y2="166" marker-end="url(#yt-m5)"/>
+          <line x1="195" y1="92" x2="320" y2="166" marker-end="url(#yt-m5)"/>
+          <line x1="620" y1="92" x2="500" y2="166" marker-end="url(#yt-m5)" marker-start="url(#yt-m5)"/>
+          <text x="230" y="140" class="sm">cache segments</text>
+          <text x="590" y="140" class="sm">read / write</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Six components: preprocessor, DAG scheduler, resource manager, task workers, temporary storage, and encoded video as the output. Each is explained below.</div>
+    </div>
+
+    <h3>1. Preprocessor</h3>
+    <p>The preprocessor has four responsibilities:</p>
+    <ol class="steps">
+      <li><strong>Video splitting</strong> The video stream is split or further split into smaller <strong>Group of Pictures (GOP)</strong> alignment. A GOP is a group of frames arranged in a specific order. Each chunk is an independently playable unit, usually a few seconds long.</li>
+      <li><strong>Support for old clients</strong> Some old mobile devices or browsers might not support video splitting on the client. The preprocessor splits videos by GOP alignment for them.</li>
+      <li><strong>DAG generation</strong> The processor generates a DAG based on configuration files that client programmers write. For example, a simple config might say: download &rarr; transcode for the video, and download &rarr; transcode for the audio.</li>
+      <li><strong>Cache data</strong> The preprocessor is a cache for segmented videos. For better reliability, it stores GOPs and metadata in temporary storage. If video encoding fails, the system can use the persisted data for retry operations.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Preprocessor: split into GOP chunks, cache them, build the DAG</div>
+      <svg class="dg" viewBox="0 0 700 220">
+        <defs><marker id="yt-m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="10" y="30" width="240" height="40" class="a"/><text x="130" y="55">Original video (5 min)</text>
+          <line x1="130" y1="72" x2="130" y2="96" marker-end="url(#yt-m6)"/>
+          <rect x="10" y="100" width="54" height="34" class="s"/><text x="37" y="122">GOP1</text>
+          <rect x="72" y="100" width="54" height="34" class="s"/><text x="99" y="122">GOP2</text>
+          <rect x="134" y="100" width="54" height="34" class="s"/><text x="161" y="122">GOP3</text>
+          <rect x="196" y="100" width="54" height="34" class="s"/><text x="223" y="122">...</text>
+          <line x1="130" y1="136" x2="130" y2="166" marker-end="url(#yt-m6)"/>
+          <rect x="50" y="170" width="160" height="40" class="y"/><text x="130" y="195">Temporary storage</text>
+          <rect x="330" y="30" width="170" height="80"/><text x="415" y="55">config file</text>
+          <text x="415" y="77" class="sm">video: download, transcode</text>
+          <text x="415" y="95" class="sm">audio: download, transcode</text>
+          <line x1="502" y1="70" x2="546" y2="70" marker-end="url(#yt-m6)"/>
+          <rect x="550" y="30" width="140" height="80" class="p"/><text x="620" y="65">DAG</text><text x="620" y="85" class="sm">ready to schedule</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Left: the video is cut into GOP-aligned chunks, which are saved to temporary storage so a failed encode can be retried without starting over. Right: a configuration file written by programmers is turned into a DAG.</div>
+    </div>
+
+    <h3>2. DAG scheduler</h3>
+    <p>The DAG scheduler <strong>splits a DAG graph into stages of tasks</strong> and puts them in the task queue in the resource manager. Tasks in the same stage can run in parallel; a stage starts only after the stage before it finishes.</p>
+    <div class="diagram"><div class="diagram-title">DAG scheduler: splitting into stages</div>
+      <svg class="dg" viewBox="0 0 700 230">
+        <defs><marker id="yt-m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="20" y="20" width="180" height="190" class="a" stroke-dasharray="5 4"/>
+          <text x="110" y="42" class="a">Stage 1</text>
+          <rect x="45" y="90" width="130" height="50" class="a"/><text x="110" y="112">Split</text><text x="110" y="129" class="sm">video, audio, metadata</text>
+          <rect x="250" y="20" width="420" height="190" class="p" stroke-dasharray="5 4"/>
+          <text x="460" y="42" class="p">Stage 2 (in parallel)</text>
+          <rect x="275" y="60" width="170" height="34" class="s"/><text x="360" y="82">Video encoding</text>
+          <rect x="275" y="104" width="170" height="34" class="s"/><text x="360" y="126">Thumbnail</text>
+          <rect x="475" y="60" width="170" height="34" class="p"/><text x="560" y="82">Audio encoding</text>
+          <rect x="475" y="104" width="170" height="34" class="s"/><text x="560" y="126">Watermark</text>
+          <text x="460" y="180" class="sm">all go into the resource manager's task queue</text>
+          <line x1="177" y1="115" x2="246" y2="115" marker-end="url(#yt-m7)"/>
+        </g>
+      </svg>
+      <div class="diagram-caption">In the book's example, stage 1 splits the original into video, audio and metadata. Stage 2 runs video encoding, thumbnail and audio encoding (and watermark if configured) in parallel.</div>
+    </div>
+
+    <h3>3. Resource manager</h3>
+    <p>The resource manager is responsible for <strong>managing the efficiency of resource allocation</strong>: matching the right task to the right machine. It contains three queues and a task scheduler:</p>
+    <dl class="terms">
+      <dt>Task queue</dt><dd>A priority queue containing tasks to be executed.</dd>
+      <dt>Worker queue</dt><dd>A priority queue containing worker utilization info (how busy each worker is).</dd>
+      <dt>Running queue</dt><dd>Info about the currently running tasks and the workers running them.</dd>
+      <dt>Task scheduler</dt><dd>Picks the optimal task/worker pair and instructs the chosen task worker to execute the job.</dd>
+    </dl>
+    <p>The resource manager works in a loop:</p>
+    <ol class="steps">
+      <li><strong>Get a task</strong> The task scheduler gets the highest-priority task from the task queue.</li>
+      <li><strong>Get a worker</strong> The task scheduler gets the optimal task worker to run the task from the worker queue.</li>
+      <li><strong>Run it</strong> The task scheduler instructs the chosen task worker to run the task.</li>
+      <li><strong>Track it</strong> The task scheduler binds the task/worker info and puts it in the running queue. When the job is done, it removes the job from the running queue.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Resource manager internals</div>
+      <svg class="dg" viewBox="0 0 700 280">
+        <defs><marker id="yt-m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="20" y="20" width="160" height="44" class="y"/><text x="100" y="47">Task queue</text>
+          <rect x="20" y="118" width="160" height="44" class="y"/><text x="100" y="145">Worker queue</text>
+          <rect x="20" y="216" width="160" height="44" class="y"/><text x="100" y="243">Running queue</text>
+          <rect x="280" y="100" width="150" height="80" class="a"/><text x="355" y="135">Task scheduler</text><text x="355" y="155" class="sm">picks best pair</text>
+          <rect x="530" y="100" width="150" height="80" class="p"/><text x="605" y="135">Task worker</text><text x="605" y="155" class="sm">e.g. encoder</text>
+          <line x1="182" y1="42" x2="290" y2="98" marker-end="url(#yt-m8)"/><text x="250" y="58" class="sm">1. get task</text>
+          <line x1="182" y1="140" x2="276" y2="140" marker-end="url(#yt-m8)"/><text x="228" y="132" class="sm">2. get worker</text>
+          <line x1="432" y1="140" x2="526" y2="140" marker-end="url(#yt-m8)"/><text x="480" y="132" class="sm">3. run task</text>
+          <line x1="300" y1="182" x2="184" y2="236" marker-end="url(#yt-m8)"/><text x="268" y="230" class="sm">4. put in running queue</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">The four-step loop. Priority queues let urgent tasks (say, a popular creator's upload) jump ahead, and the worker queue lets the scheduler send work to the least-busy suitable machine.</div>
+    </div>
+
+    <h3>4. Task workers</h3>
+    <p>Task workers run the tasks defined in the DAG. Different task workers may run different tasks.</p>
+    <div class="diagram"><div class="diagram-title">Task worker types</div>
+      <div class="flow">
+        <div class="node pink">Watermark<small>overlay logo</small></div>
+        <div class="node pink">Encoder<small>720p, 1080p...</small></div>
+        <div class="node pink">Thumbnail<small>preview image</small></div>
+        <div class="node pink">Merger<small>joins pieces</small></div>
+        <div class="node pink">...<small>other tasks</small></div>
+      </div>
+      <div class="diagram-caption">Workers are specialised. A pool of encoders can be scaled independently from a pool of thumbnail makers, depending on where the load is.</div>
+    </div>
+
+    <h3>5. Temporary storage</h3>
+    <p>Multiple storage systems are used here. The choice depends on factors like data type, data size, access frequency, and data life span.</p>
+    <div class="cards">
+      <div class="card yellow"><h4>Metadata &rarr; memory</h4><p>Metadata is frequently accessed by workers and the data size is usually small. So caching metadata in memory is a good idea.</p></div>
+      <div class="card green"><h4>Video / audio &rarr; blob storage</h4><p>Video and audio data are large, so they go in blob storage.</p></div>
+    </div>
+    <p>Data in temporary storage is <strong>freed up once the corresponding video processing is complete</strong>.</p>
+
+    <h3>6. Encoded video</h3>
+    <p>Encoded video is the final output of the encoding pipeline. An example output: <code>funny_720p.mp4</code>.</p>
+  </section>
+
+  <section>
+    <h2 id="optimizations-speed">System optimizations: speed</h2>
+    <p>At this point the design works. Now we refine it for speed, safety, and cost. We start with speed.</p>
+    <h3>Speed optimization 1: parallelize video uploading</h3>
+    <p>Uploading a whole video as one unit is inefficient: if the connection drops at 90%, you start over. Instead, the <strong>client</strong> splits the video into smaller chunks by GOP alignment and uploads them in parallel. This allows fast resumable uploads when a previous upload failed. The job of splitting a video file by GOP can be done by the client to improve upload speed.</p>
+    <div class="diagram"><div class="diagram-title">Client-side splitting into GOP chunks</div>
+      <svg class="dg" viewBox="0 0 680 200">
+        <defs><marker id="yt-m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="20" y="75" width="130" height="50" class="a"/><text x="85" y="97">Client</text><text x="85" y="114" class="sm">splits by GOP</text>
+          <rect x="220" y="20" width="80" height="34" class="s"/><text x="260" y="42">GOP 1</text>
+          <rect x="220" y="83" width="80" height="34" class="s"/><text x="260" y="105">GOP 2</text>
+          <rect x="220" y="146" width="80" height="34" class="s"/><text x="260" y="168">GOP 3</text>
+          <line x1="152" y1="92" x2="216" y2="40" marker-end="url(#yt-m9)"/>
+          <line x1="152" y1="100" x2="216" y2="100" marker-end="url(#yt-m9)"/>
+          <line x1="152" y1="108" x2="216" y2="160" marker-end="url(#yt-m9)"/>
+          <rect x="460" y="75" width="190" height="50" class="g"/><text x="555" y="97">Original storage</text><text x="555" y="114" class="sm">receives chunks in parallel</text>
+          <line x1="302" y1="38" x2="456" y2="92" marker-end="url(#yt-m9)"/>
+          <line x1="302" y1="100" x2="456" y2="100" marker-end="url(#yt-m9)"/>
+          <line x1="302" y1="162" x2="456" y2="108" marker-end="url(#yt-m9)"/>
+        </g>
+      </svg>
+      <div class="diagram-caption">Chunks upload at the same time, which is faster. If chunk 2 fails, only chunk 2 is retried, not the whole 1 GB file.</div>
+    </div>
+
+    <h3>Speed optimization 2: place upload centers close to users</h3>
+    <p>Another way to improve upload speed is setting up multiple upload centers across the globe. People in the United States can upload videos to the North America upload center, and people in China can upload to the Asian upload center. To achieve this, <strong>we use the CDN as upload centers</strong>.</p>
+    <div class="diagram"><div class="diagram-title">Regional upload centers</div>
+      <div class="flow">
+        <div class="node accent">US creator</div><div class="arrow">→</div><div class="node green">North America upload center<small>CDN edge</small></div>
+      </div>
+      <div class="flow">
+        <div class="node accent">Creator in China</div><div class="arrow">→</div><div class="node green">Asia upload center<small>CDN edge</small></div>
+      </div>
+      <div class="diagram-caption">A shorter network distance means fewer hops, lower latency and fewer dropped connections during upload.</div>
+    </div>
+
+    <h3>Speed optimization 3: parallelism everywhere</h3>
+    <p>Achieving low latency requires serious effort. Another optimization is to build a <strong>loosely coupled system</strong> and enable high parallelism. Look at the flow of a video from original storage to the CDN: each step depends on the output of the previous one. This dependency makes parallelism difficult.</p>
+    <div class="diagram"><div class="diagram-title">Before: tightly coupled pipeline</div>
+      <div class="flow">
+        <div class="node green">Original storage</div><div class="arrow">→</div>
+        <div class="node sky">Download module</div><div class="arrow">→</div>
+        <div class="node pink">Encoding module</div><div class="arrow">→</div>
+        <div class="node sky">Upload module</div><div class="arrow">→</div>
+        <div class="node green">Encoded storage</div><div class="arrow">→</div>
+        <div class="node green">CDN</div>
+      </div>
+      <div class="diagram-caption">The encoding module must wait for the download module to hand it data directly. If one step is slow, everything behind it stalls.</div>
+    </div>
+    <p>To make the system more loosely coupled, we <strong>introduce message queues</strong> between modules:</p>
+    <div class="diagram"><div class="diagram-title">After: message queues between modules</div>
+      <div class="flow">
+        <div class="node green">Original storage</div><div class="arrow">→</div>
+        <div class="node sky">Download module</div><div class="arrow">→</div>
+        <div class="node yellow">MQ</div><div class="arrow">→</div>
+        <div class="node pink">Encoding module</div><div class="arrow">→</div>
+        <div class="node yellow">MQ</div><div class="arrow">→</div>
+        <div class="node sky">Upload module</div><div class="arrow">→</div>
+        <div class="node green">Encoded storage / CDN</div>
+      </div>
+      <div class="diagram-caption">Each module drops its output into a queue and moves on. The next module pulls from the queue whenever it is ready.</div>
+    </div>
+    <ul>
+      <li><strong>Before</strong> the message queue was introduced, the encoding module had to wait for the output of the download module.</li>
+      <li><strong>After</strong> the message queue is introduced, the encoding module does not need to wait. If there are events in the queue, the encoding module can execute those jobs in parallel.</li>
+    </ul>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>A kitchen without a ticket rail: the chef stands next to the waiter waiting for each order. A kitchen with a ticket rail: waiters clip orders on the rail and walk away; several cooks grab tickets whenever they're free. The rail is the message queue.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="optimizations-safety">System optimizations: safety</h2>
+    <h3>Safety optimization 1: pre-signed upload URL</h3>
+    <p>Safety is one of the most important aspects of any product. We want only authorized users to upload videos to the right location. Without protection, anyone who knew the storage bucket address could dump files into it. The fix is a <strong>pre-signed URL</strong>:</p>
+    <div class="diagram"><div class="diagram-title">Pre-signed URL upload flow</div>
+      <svg class="dg" viewBox="0 0 680 240">
+        <defs><marker id="yt-m10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="30" y="30" width="120" height="180" class="a"/><text x="90" y="125">Client</text>
+          <rect x="520" y="20" width="140" height="70" class="s"/><text x="590" y="52">API servers</text><text x="590" y="70" class="sm">sign the URL</text>
+          <rect x="520" y="150" width="140" height="70" class="g"/><text x="590" y="182">Original</text><text x="590" y="200" class="sm">storage (S3)</text>
+          <line x1="152" y1="45" x2="516" y2="45" marker-end="url(#yt-m10)"/>
+          <text x="335" y="38" class="sm">1. "I want to upload" (authenticated)</text>
+          <line x1="516" y1="75" x2="152" y2="75" marker-end="url(#yt-m10)"/>
+          <text x="335" y="95" class="sm">2. returns pre-signed URL</text>
+          <line x1="152" y1="185" x2="516" y2="185" marker-end="url(#yt-m10)"/>
+          <text x="335" y="175" class="sm">3. upload video directly using the URL</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">The API server, which knows who the user is, hands out a URL that grants permission to upload one object to one location for a limited time. The big file then goes straight to storage.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Request</strong> The client makes an HTTP request to API servers to fetch the pre-signed URL, which gives access permission to the object identified in the URL. The term "pre-signed URL" comes from uploading files to Amazon S3. Other cloud providers may use a different name; Microsoft Azure blob storage calls it "Shared Access Signature."</li>
+      <li><strong>Receive</strong> API servers respond with a pre-signed URL.</li>
+      <li><strong>Upload</strong> Once the client receives the response, it uploads the video using the pre-signed URL.</li>
+    </ol>
+
+    <h3>Safety optimization 2: protect your videos</h3>
+    <p>Many content makers are reluctant to post videos online because they fear their original videos will be stolen. To protect copyrighted videos, we can adopt one of three options:</p>
+    <div class="cards">
+      <div class="card purple"><h4>Digital rights management (DRM)</h4><p>Three major DRM systems are <strong>Apple FairPlay</strong>, <strong>Google Widevine</strong>, and <strong>Microsoft PlayReady</strong>. The player must get a licence before it can play the video.</p></div>
+      <div class="card sky"><h4>AES encryption</h4><p>You can encrypt a video and configure an authorization policy. The encrypted video is decrypted upon playback, which ensures only authorized users can watch it.</p></div>
+      <div class="card yellow"><h4>Visual watermarking</h4><p>An image overlay on top of the video containing identifying information, such as a company logo or name.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="optimizations-cost">System optimizations: cost-saving</h2>
+    <p>Remember the estimate: <strong>$150,000 per day</strong> on the CDN. The CDN is a crucial part of the system: it makes video fast globally. But it is expensive, especially when data is large. How do we cut the bill?</p>
+    <p>Previous research shows that YouTube video streams follow a <strong>long-tail distribution</strong>: a few popular videos are accessed very frequently, but many others have few or no viewers.</p>
+    <div class="diagram"><div class="diagram-title">Long-tail distribution of video views</div>
+      <svg class="dg" viewBox="0 0 680 260">
+        <g text-anchor="middle">
+          <line x1="60" y1="210" x2="650" y2="210"/>
+          <line x1="60" y1="210" x2="60" y2="20"/>
+          <text x="355" y="245" class="sm">videos, sorted from most to least popular</text>
+          <text x="30" y="115" class="sm">views</text>
+          <path d="M65,30 C100,140 160,180 260,195 C380,205 520,207 645,208" class="a" stroke-width="2.5"/>
+          <line x1="180" y1="20" x2="180" y2="210" stroke-dasharray="4 4"/>
+          <text x="120" y="60" class="g">Head</text>
+          <text x="120" y="78" class="sm">popular</text>
+          <text x="120" y="94" class="sm">serve from CDN</text>
+          <text x="420" y="150" class="y">Long tail</text>
+          <text x="420" y="168" class="sm">millions of rarely-watched videos</text>
+          <text x="420" y="184" class="sm">serve from cheaper video servers</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">A small number of videos get most of the views. Paying CDN prices to cache the entire long tail is wasteful.</div>
+    </div>
+    <p>Based on this observation, the book suggests these optimizations:</p>
+    <ol class="steps">
+      <li><strong>Serve only popular videos from the CDN</strong> Other videos are served from high-capacity storage <em>video servers</em> that we run ourselves, which is cheaper per GB.</li>
+      <li><strong>Fewer encoded versions for less popular content</strong> Short videos can be encoded on demand. Less popular videos may not need 5 versions; that saves storage and transcoding work.</li>
+      <li><strong>Regional popularity</strong> Some videos are popular only in certain regions. There is no need to distribute these videos to other regions.</li>
+      <li><strong>Build your own CDN, like Netflix, and partner with Internet Service Providers (ISPs)</strong> Building a CDN is a giant project, but it can make sense for large streaming companies. An ISP can be Comcast, AT&amp;T, Verizon, or other internet providers. ISPs are located all around the world and are close to users. By partnering with ISPs, you can improve the viewing experience and reduce bandwidth charges.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Routing views by popularity</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Client presses play</div></div>
+        <div class="arch-down">↓<small>is this video popular (in this region)?</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Yes</span><div class="node green">CDN edge<small>fast, pricier per GB</small></div></div>
+          <div class="group"><span class="group-label">No</span><div class="node sky">Our video servers<small>high-capacity storage, cheaper</small></div></div>
+        </div>
+      </div>
+      <div class="diagram-caption">Popular content gets the premium path; the long tail is served more cheaply. Viewers of rare videos get slightly slower start times, which is an acceptable trade.</div>
+    </div>
+    <div class="callout info"><div class="callout-title">How the book frames it</div>
+      <p>All these optimizations are based on content popularity, user access pattern, video size, and so on. It is important to <strong>analyze historical viewing patterns</strong> before doing any optimization.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="error-handling">Error handling</h2>
+    <p>For a large-scale system, errors are unavoidable. To build a highly fault-tolerant system, we must handle errors gracefully and recover from them fast. Two types of errors exist:</p>
+    <div class="cards">
+      <div class="card yellow"><h4>Recoverable errors</h4><p>For recoverable errors, such as a video segment failing to transcode, the general idea is to <strong>retry the operation a few times</strong>. If the task keeps failing and the system believes it is not recoverable, it returns a proper error code to the client.</p></div>
+      <div class="card red"><h4>Non-recoverable errors</h4><p>For non-recoverable errors, such as a malformed video format, the system <strong>stops the running tasks</strong> associated with the video and returns the proper error code to the client.</p></div>
+    </div>
+    <p>Typical errors for each system component, and the playbook for each:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Component / error</th><th>What to do</th></tr>
+      <tr><td>Upload error</td><td>Retry a few times.</td></tr>
+      <tr><td>Split video error</td><td>If older versions of clients cannot split videos by GOP alignment, the entire video is passed to the server, and the job of splitting is done on the server side.</td></tr>
+      <tr><td>Transcoding error</td><td>Retry.</td></tr>
+      <tr><td>Preprocessor error</td><td>Regenerate the DAG diagram.</td></tr>
+      <tr><td>DAG scheduler error</td><td>Reschedule a task.</td></tr>
+      <tr><td>Resource manager queue down</td><td>Use a replica.</td></tr>
+      <tr><td>Task worker down</td><td>Retry the task on a new worker.</td></tr>
+      <tr><td>API server down</td><td>API servers are stateless, so requests are directed to a different API server.</td></tr>
+      <tr><td>Metadata cache server down</td><td>Data is replicated multiple times. If one node goes down, you can still access other nodes to fetch data. Bring up a new cache server to replace the dead one.</td></tr>
+      <tr><td>Metadata DB server down</td><td><strong>Master is down:</strong> promote one of the slaves to act as the new master. <strong>Slave is down:</strong> use another slave for reads and bring up another database server to replace the dead one.</td></tr>
+    </table></div>
+    <div class="callout tip"><div class="callout-title">Pattern to remember</div>
+      <p>Almost every row is one of three ideas: <strong>retry</strong> (transient failures), <strong>replicate</strong> (so a copy can take over), or <strong>stay stateless</strong> (so any server can do the job). Say that out loud in an interview and you can derive the rest.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step-4-wrap-up">Step 4: Wrap up</h2>
+    <p>If there is extra time at the end, the book suggests these talking points:</p>
+    <dl class="terms">
+      <dt>Scale the API tier</dt><dd>Because API servers are stateless, it is easy to scale the API tier horizontally: just add more servers behind the load balancer.</dd>
+      <dt>Scale the database</dt><dd>Talk about database replication and sharding.</dd>
+      <dt>Live streaming</dt><dd>Recording and broadcasting video in real time. Our system is not designed for live streaming, but it has some similarities: both need uploading, encoding and streaming. Notable differences:
+        <ul>
+          <li>Live streaming has a <strong>higher latency requirement</strong>, so it might need a different streaming protocol.</li>
+          <li>Live streaming has a <strong>lower requirement for parallelism</strong>, because small chunks of data are already processed in real time.</li>
+          <li>Live streaming requires <strong>different sets of error handling</strong>. Any error handling that takes too much time is not acceptable.</li>
+        </ul></dd>
+      <dt>Video takedowns</dt><dd>Videos that violate copyrights, pornography, or other illegal acts must be removed. Some can be discovered by the system during the upload process, while others are discovered through user flagging.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <div class="diagram"><div class="diagram-title">Final architecture: upload, transcode, stream</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Creator / Viewer<small>mobile, web, smart TV</small></div></div>
+        <div class="arch-down">↓<small>API calls via load balancer</small></div>
+        <div class="arch-row">
+          <div class="node">Load balancer</div>
+          <div class="node sky">API servers<small>stateless, sign upload URLs</small></div>
+          <div class="node yellow">Metadata cache</div>
+          <div class="node db yellow">Metadata DB<small>sharded + replicated</small></div>
+        </div>
+        <div class="arch-down">↓<small>video chunks via pre-signed URL to nearest upload center</small></div>
+        <div class="arch-row">
+          <div class="node green">Original storage<small>blob</small></div>
+        </div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Transcoding</span>
+            <div class="node sky">Preprocessor</div>
+            <div class="node sky">DAG scheduler</div>
+            <div class="node sky">Resource manager</div>
+            <div class="node pink">Task workers</div>
+            <div class="node yellow">Temp storage</div>
+          </div>
+        </div>
+        <div class="arch-down">↓<small>encoded files + "done" event</small></div>
+        <div class="arch-row">
+          <div class="node green">Transcoded storage</div>
+          <div class="node yellow">Completion queue</div>
+          <div class="node sky">Completion handler<small>updates DB + cache</small></div>
+        </div>
+        <div class="arch-down">↓<small>popular videos pushed to CDN; long tail on video servers</small></div>
+        <div class="arch-row">
+          <div class="node green">CDN edge servers</div>
+          <div class="node sky">Own video servers</div>
+        </div>
+        <div class="arch-down">↓<small>streamed via MPEG-DASH / HLS, adaptive bitrate</small></div>
+        <div class="arch-row"><div class="node accent">Viewer's player</div></div>
+      </div>
+      <div class="diagram-caption">The whole system on one page. The top half is the upload path; the bottom half is the watch path.</div>
+    </div>
+    <h3>Walkthrough: one video's life</h3>
+    <ol class="steps">
+      <li><strong>Get permission</strong> Priya opens the app and picks a 600 MB video. The app asks the API servers (through the load balancer) for a pre-signed upload URL. The API server checks she is logged in and returns the URL.</li>
+      <li><strong>Upload fast</strong> The app splits the file into GOP chunks and uploads them in parallel to the nearest upload center. If one chunk fails, only that chunk is retried. Meanwhile, the app sends her title and description to the API servers, which store them in the metadata DB and cache.</li>
+      <li><strong>Preprocess</strong> The preprocessor reads the original, splits it into GOPs if needed, caches the segments in temporary storage, and builds a DAG from the configuration (her channel has a watermark, so the DAG includes a watermark task).</li>
+      <li><strong>Schedule and run</strong> The DAG scheduler splits the DAG into stages and pushes tasks into the resource manager's task queue. The task scheduler pairs each task with the best available worker: encoders make 360p, 480p, 720p and 1080p; another worker makes the thumbnail; another adds the watermark; a merger assembles the output.</li>
+      <li><strong>Finish</strong> Encoded files go to transcoded storage and (if expected to be popular) out to the CDN. A completion event goes into the completion queue; a completion handler marks the video "ready" in the metadata DB and cache. Priya is notified.</li>
+      <li><strong>Watch</strong> Rahul in another city taps the video. The API server returns metadata including the stream URL. His player streams segments from the nearest CDN edge using a protocol like HLS, starting at 480p and moving up to 1080p when his Wi-Fi proves fast. The stream is protected with DRM/AES so it can't simply be copied.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="interview-guide">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Understand the problem and scope</div><div class="iv-time">3–10 min</div></div>
+      <ul>
+        <li>Narrow to upload + watch. Ask about clients, DAU, watch time, international users, formats, encryption, max file size, and whether cloud services are allowed.</li>
+        <li>Do the two key estimates: 150 TB/day storage and $150,000/day CDN.</li>
+      </ul>
+      <div class="say">"Let me confirm scope: we focus on uploading and watching videos, on mobile, web and smart TV, with 5 million DAU, mostly international, files up to 1 GB, and we can use existing cloud storage and CDN. With 10% of users uploading a 300 MB video daily, that's 150 TB of new storage per day. Viewing 5 videos each through CloudFront at 2 cents a GB costs about $150,000 per day, so CDN cost will be a major design driver."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">High-level design</div><div class="iv-time">10–15 min</div></div>
+      <ul>
+        <li>Three components: client, CDN, API servers. Justify using existing blob storage and CDN (Netflix on AWS, Facebook on Akamai).</li>
+        <li>Draw the upload architecture; explain flow a (video) and flow b (metadata) running in parallel.</li>
+        <li>Explain streaming vs downloading and name streaming protocols.</li>
+      </ul>
+      <div class="say">"Video bytes never pass through our API servers. The client uploads to blob storage; transcoding servers pick it up, write outputs to transcoded storage and the CDN, and drop a completion event on a queue. A completion handler updates the metadata DB and cache. In parallel, the client sends metadata through the API servers."</div>
+      <div class="say them">"Why not just store the uploaded file and serve it as is?"</div>
+      <div class="say">"Raw files are large and in whatever format the phone produced. Many devices can't play every format, and viewers on slow networks would buffer constantly. Transcoding gives us compressed versions in several resolutions and formats, which also enables adaptive bitrate streaming."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Deep dive</div><div class="iv-time">10–25 min</div></div>
+      <ul>
+        <li>Transcoding: bitrate, container vs codec, the DAG model, and the six-part transcoding architecture.</li>
+        <li>Optimizations: speed (GOP chunk uploads, upload centers, message queues), safety (pre-signed URLs, DRM/AES/watermark), cost (long tail).</li>
+        <li>Error handling: recoverable vs non-recoverable; retry, replicate, stateless.</li>
+      </ul>
+      <div class="say">"I'd model transcoding as a DAG, like Facebook's streaming video engine. The preprocessor splits the video into GOPs, caches them, and builds the DAG from config. The DAG scheduler splits it into stages, and the resource manager matches tasks to workers using a task queue, a worker queue and a running queue."</div>
+      <div class="say them">"The CDN bill is too high. What would you do?"</div>
+      <div class="say">"Views follow a long tail. I'd serve only popular videos from the CDN and the rest from our own high-capacity video servers; keep fewer encoded versions for unpopular videos and encode short ones on demand; distribute regionally popular videos only to those regions; and at very large scale, build our own CDN and partner with ISPs like Netflix does. I'd analyze historical viewing patterns first."</div>
+      <div class="say them">"How do you stop random people from uploading to your bucket?"</div>
+      <div class="say">"The client first asks our API servers for a pre-signed URL, after authentication. That URL grants time-limited permission to write one specific object. The client then uploads directly to storage with it. Azure calls this a Shared Access Signature."</div>
+      <div class="say them">"A task worker crashes in the middle of encoding 1080p. What happens?"</div>
+      <div class="say">"It's a recoverable error. The GOP segments are cached in temporary storage by the preprocessor, so the resource manager retries the task on a new worker without re-uploading or re-splitting. If it keeps failing, we return an error code to the client."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3–5 min</div></div>
+      <ul>
+        <li>Scale the stateless API tier horizontally; scale DB with replication and sharding.</li>
+        <li>Live streaming differences: latency, parallelism, error handling. Video takedowns.</li>
+      </ul>
+      <div class="say them">"How would live streaming change this?"</div>
+      <div class="say">"Live streaming needs much lower latency, so it may need a different protocol. It needs less parallelism, because small chunks are processed in real time. And error handling must be fast, because a slow retry is visible to live viewers."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Sending video bytes through API servers</div>
+      <p>Pushing 1 GB uploads through your application servers wastes their capacity and bandwidth. Upload directly to blob storage (with a pre-signed URL) and keep API servers for small requests.</p>
+    </div>
+    <div class="callout danger"><div class="callout-title">Forgetting transcoding</div>
+      <p>Storing and serving the original file ignores device compatibility, file size, and adaptive bitrate. Transcoding is the heart of this problem.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Ignoring cost</div>
+      <p>Saying "just put everything on the CDN" without noticing the $150,000/day bill misses what the interviewer is looking for. Bring up the long tail.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Proposing to build a CDN from scratch first</div>
+      <p>Unless the company is Netflix-sized, use an existing CDN and blob storage. Mention building your own CDN only as a later cost optimization.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Tightly coupled pipeline</div>
+      <p>A chain where each module calls the next directly can't parallelize and fails as a whole. Use message queues between modules.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Treating all errors the same</div>
+      <p>Retrying a malformed video forever wastes resources. Separate recoverable errors (retry) from non-recoverable ones (stop and return an error).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>Using the book's assumptions, how much new storage is needed per day?</summary><div><p>5 million DAU &times; 10% uploading &times; 300 MB = 150 TB per day. The 10% is the share of users who upload one video daily.</p></div></details>
+      <details><summary>How is the daily CDN cost of $150,000 calculated?</summary><div><p>5 million users &times; 5 videos &times; 0.3 GB &times; $0.02 per GB (CloudFront) = $150,000. It shows that serving video is very expensive, which motivates the cost optimizations.</p></div></details>
+      <details><summary>What are the three main components at the highest level, and what does each do?</summary><div><p>Client (phone, browser, TV), CDN (stores and streams videos), and API servers (everything else: feed, upload URLs, metadata updates, sign-up).</p></div></details>
+      <details><summary>Why are container and codec different things?</summary><div><p>The container (.mp4, .mov, .avi) is the box holding video, audio and metadata. The codec (H.264, VP9, HEVC) is the compression algorithm used for the content. The same container can hold content compressed with different codecs.</p></div></details>
+      <details><summary>Why is the DAG model useful for transcoding?</summary><div><p>Different creators need different pipelines (watermark or not, custom thumbnail, HD or not). The DAG lets programmers define tasks and their order in config files, and tasks without dependencies between them run in parallel.</p></div></details>
+      <details><summary>Describe the resource manager's four-step loop.</summary><div><p>1) The task scheduler gets the highest-priority task from the task queue. 2) It gets the optimal worker from the worker queue. 3) It tells that worker to run the task. 4) It records the task/worker pair in the running queue, removing it when the job is done.</p></div></details>
+      <details><summary>Scenario: users in Asia complain uploads are slow and often fail halfway. What two changes help?</summary><div><p>Split videos into GOP chunks on the client and upload them in parallel, so a failure only retries one chunk. And place upload centers close to users, using the CDN as upload centers, so Asian users upload to an Asian center.</p></div></details>
+      <details><summary>Scenario: an old smart TV app can't split videos into GOPs. What happens?</summary><div><p>The entire video is uploaded to the server, and the preprocessor splits it by GOP alignment on the server side. This is one of the preprocessor's responsibilities ("support for old clients").</p></div></details>
+      <details><summary>What is a pre-signed URL and why use it?</summary><div><p>A temporary URL from the API servers that grants permission to upload a specific object to storage. It ensures only authorized users upload, to the right location. S3 calls it a pre-signed URL; Azure calls it a Shared Access Signature.</p></div></details>
+      <details><summary>Scenario: the metadata DB master crashes. What should happen? And if a slave crashes?</summary><div><p>If the master is down, promote one of the slaves to be the new master. If a slave is down, use another slave for reads and bring up a new database server to replace the dead one.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Scope: upload + watch; 5M DAU; mobile/web/TV; max 1 GB; use existing cloud blob storage + CDN.</li>
+      <li>Estimates: 150 TB/day storage (5M &times; 10% &times; 300 MB); $150,000/day CDN (5M &times; 5 &times; 0.3 GB &times; $0.02).</li>
+      <li>Three components: client, CDN (streams video), API servers (everything else).</li>
+      <li>Upload = two parallel flows: (a) video to original storage, transcode, transcoded storage + CDN, completion queue + handler; (b) metadata via API servers.</li>
+      <li>Streaming plays pieces as they arrive; protocols: MPEG-DASH, Apple HLS, Microsoft Smooth Streaming, Adobe HDS. Stream from the nearest CDN edge.</li>
+      <li>Transcode because raw video is huge, devices differ, and adaptive bitrate needs multiple qualities. Format = container (.mp4) + codec (H.264, VP9, HEVC).</li>
+      <li>DAG model (from Facebook): split into video/audio/metadata; tasks include inspection, encodings, thumbnail, watermark, audio encoding.</li>
+      <li>Transcoding architecture: preprocessor (GOP split, cache, DAG generation), DAG scheduler (stages), resource manager (task/worker/running queues + scheduler), task workers, temp storage (memory + blob), encoded video.</li>
+      <li>Speed: client GOP-chunk parallel uploads; upload centers near users (CDN); message queues between modules.</li>
+      <li>Safety: pre-signed upload URLs; DRM (FairPlay, Widevine, PlayReady), AES encryption, visual watermark.</li>
+      <li>Cost: long tail; popular on CDN, rest on own video servers; fewer versions / on-demand encoding; regional distribution; own CDN + ISP partners.</li>
+      <li>Errors: recoverable = retry; non-recoverable = stop + error code; replicas for queues/cache/DB; stateless API servers; promote slave if master dies.</li>
+    </ul></div>
+  </section>
+</main>
+<script src="assets/app.js"></script></body></html>

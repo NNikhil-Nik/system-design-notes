@@ -1,0 +1,1748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>System Design Deep Dive – Ch 4–10</title>
+<style>
+:root{
+  --bg:#0d0f1a;--surface:#141728;--surface2:#1c2038;--surface3:#232845;
+  --border:#2a2f52;--text:#e8eaf6;--muted:#7b82b0;--faint:#454d7a;
+  --accent:#7c83f5;--green:#4ade80;--yellow:#fbbf24;--red:#f87171;--pink:#f472b6;--sky:#38bdf8;--teal:#2dd4bf;--purple:#a78bfa;
+  --ch4:#7c83f5;--ch5:#2dd4bf;--ch6:#fbbf24;--ch7:#f472b6;--ch8:#38bdf8;--ch9:#a78bfa;--ch10:#4ade80;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);line-height:1.65;font-size:14px}
+
+/* NAV */
+nav{position:sticky;top:0;z-index:200;background:rgba(13,15,26,.95);backdrop-filter:blur(16px);border-bottom:1px solid var(--border);height:52px;display:flex;align-items:center;padding:0 20px;gap:4px;overflow-x:auto}
+.nav-logo{font-size:12px;font-weight:800;color:var(--accent);letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;margin-right:16px;flex-shrink:0}
+nav a{color:var(--muted);text-decoration:none;font-size:12px;padding:5px 9px;border-radius:6px;white-space:nowrap;transition:.15s;flex-shrink:0}
+nav a:hover{color:var(--text);background:var(--surface2)}
+
+/* HERO */
+.hero{max-width:740px;margin:0 auto;padding:56px 20px 44px;text-align:center}
+.hero-tag{display:inline-block;border:1px solid var(--border);color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:3px 12px;border-radius:20px;margin-bottom:16px;background:var(--surface2)}
+.hero h1{font-size:clamp(24px,5vw,38px);font-weight:800;line-height:1.2;margin-bottom:12px}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero p{color:var(--muted);font-size:14px;max-width:500px;margin:0 auto 24px}
+.hero-chips{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.hero-chip{text-decoration:none;font-size:12px;font-weight:600;padding:6px 14px;border-radius:8px;border:1px solid;transition:.15s}
+.hero-chip:hover{filter:brightness(1.2);transform:translateY(-1px)}
+
+/* MAIN */
+main{max-width:920px;margin:0 auto;padding:0 20px 80px}
+
+/* CHAPTER */
+.ch{border:1px solid var(--border);border-radius:16px;overflow:hidden;margin-bottom:52px;opacity:0;transform:translateY(16px);transition:opacity .4s,transform .4s}
+.ch.show{opacity:1;transform:none}
+.ch-head{padding:24px 28px;display:flex;align-items:flex-start;gap:16px;border-bottom:1px solid var(--border)}
+.ch-num{width:46px;height:46px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;flex-shrink:0}
+.ch-info h2{font-size:20px;font-weight:800;margin-bottom:4px}
+.ch-info .sub{font-size:12.5px;color:var(--muted)}
+.ch-tldr{background:var(--surface2);border-bottom:1px solid var(--border);padding:12px 28px;font-size:12.5px;color:var(--muted);display:flex;align-items:flex-start;gap:8px}
+.ch-tldr strong{color:var(--accent);flex-shrink:0}
+
+/* TABS */
+.tabs{display:flex;border-bottom:1px solid var(--border);background:var(--surface);padding:0 28px;gap:0;overflow-x:auto}
+.tab-btn{background:none;border:none;color:var(--muted);font-size:12px;font-weight:600;padding:12px 14px;cursor:pointer;border-bottom:2px solid transparent;transition:.15s;white-space:nowrap}
+.tab-btn.active{color:var(--text);border-bottom-color:var(--accent)}
+.tab-btn:hover:not(.active){color:var(--text)}
+.tab-panels{background:var(--surface)}
+.tab-panel{display:none;padding:24px 28px}
+.tab-panel.active{display:block}
+
+/* SECTIONS */
+.sec{margin-bottom:24px}
+.sec:last-child{margin-bottom:0}
+.sec-title{font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.sec-title::after{content:'';flex:1;height:1px;background:var(--border)}
+
+/* BULLETS */
+ul.b{list-style:none;display:flex;flex-direction:column;gap:7px}
+ul.b li{font-size:13.5px;padding-left:18px;position:relative;line-height:1.6}
+ul.b li::before{content:'▸';position:absolute;left:0;font-size:9px;top:3px;color:var(--faint)}
+ul.b li strong{font-weight:700}
+ul.b li .note{color:var(--muted);font-size:12.5px}
+ul.b li.warn::before{color:var(--yellow)}
+ul.b li.good::before{color:var(--green)}
+ul.b li.bad::before{color:var(--red)}
+
+/* ALGO CARDS */
+.algo-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
+.acard{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;border-top:2px solid}
+.acard h4{font-size:13px;font-weight:700;margin-bottom:8px}
+.acard p{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:6px}
+.acard .pros{font-size:11.5px;color:var(--green)}
+.acard .cons{font-size:11.5px;color:var(--red)}
+
+/* TABLE */
+.t{width:100%;border-collapse:collapse;font-size:12.5px}
+.t th{text-align:left;padding:9px 12px;background:var(--surface2);color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+.t td{padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+.t tr:last-child td{border-bottom:none}
+.t tr:hover td{background:var(--surface2)}
+
+/* DIAGRAM STYLES */
+.diag{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:24px;overflow-x:auto;margin-bottom:12px}
+.diag-title{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:16px;text-align:center}
+.flow-row{display:flex;align-items:center;flex-wrap:wrap;gap:0;justify-content:center}
+.box{border:1px solid var(--border);border-radius:7px;padding:7px 13px;font-size:12px;font-weight:600;background:var(--surface);white-space:nowrap;text-align:center}
+.arr{color:var(--faint);padding:0 6px;font-size:13px;flex-shrink:0}
+.arr-down{color:var(--faint);font-size:13px;text-align:center;padding:4px 0}
+.fork{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.fork-item{display:flex;flex-direction:column;align-items:center;gap:2px}
+.vline{width:1px;height:16px;background:var(--border);margin:0 auto}
+.hstack{display:flex;gap:8px;align-items:flex-start;justify-content:center;flex-wrap:wrap}
+.vstack{display:flex;flex-direction:column;align-items:center;gap:4px}
+.layer{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+
+/* HIGHLIGHT */
+.hl{border-left:3px solid;border-radius:0 8px 8px 0;padding:12px 14px;font-size:13px;line-height:1.7;margin-bottom:10px;background:var(--surface2)}
+.hl strong{font-weight:700}
+
+/* KV GRID */
+.kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.kv-box{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.kv-box .k{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-bottom:3px}
+.kv-box .v{font-size:13px;font-weight:700}
+
+/* CODE */
+code{font-family:'SF Mono','Fira Code',monospace;font-size:11.5px;background:var(--surface2);border:1px solid var(--border);padding:1px 5px;border-radius:4px;color:var(--teal)}
+pre{font-family:'SF Mono','Fira Code',monospace;font-size:12px;background:var(--surface2);border:1px solid var(--border);padding:14px;border-radius:8px;overflow-x:auto;line-height:1.6}
+pre .c{color:var(--faint)}
+pre .k{color:var(--accent)}
+pre .s{color:var(--teal)}
+pre .n{color:var(--yellow)}
+
+/* INTERVIEW */
+.iv-step{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:10px}
+.iv-step-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.iv-step-num{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex-shrink:0}
+.iv-step-title{font-size:13px;font-weight:700}
+.iv-step-time{font-size:11px;color:var(--muted);margin-left:auto}
+.speech{background:var(--surface);border:1px solid var(--border);border-radius:0 8px 8px 8px;padding:10px 13px;font-size:12.5px;color:var(--muted);line-height:1.7;font-style:italic;margin-top:6px;position:relative}
+.speech::before{content:'"';font-size:18px;color:var(--accent);position:absolute;top:-2px;left:10px}
+.faq{margin-top:10px}
+.faq-q{font-size:13px;font-weight:600;color:var(--text);padding:8px 0;border-bottom:1px solid var(--border);display:flex;gap:8px}
+.faq-q::before{content:'Q:';color:var(--accent);flex-shrink:0;font-weight:800}
+.faq-a{font-size:12.5px;color:var(--muted);padding:8px 0 8px 22px;border-bottom:1px solid var(--border);line-height:1.7}
+.faq-a::first-line{color:var(--text)}
+
+/* NUMBERS BOX */
+.nums{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.num-card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center}
+.num-card .big{font-size:22px;font-weight:800;margin-bottom:4px}
+.num-card .label{font-size:11.5px;color:var(--muted)}
+
+/* RING DIAGRAM */
+.ring-wrap{position:relative;width:280px;height:280px;margin:0 auto}
+.ring-circle{position:absolute;border-radius:50%;border:2px solid var(--border)}
+.ring-dot{position:absolute;width:10px;height:10px;border-radius:50%;transform:translate(-50%,-50%)}
+.ring-label{position:absolute;font-size:11px;font-weight:700;transform:translate(-50%,-50%)}
+
+/* BIT LAYOUT */
+.bits{display:flex;gap:3px;margin-bottom:10px;flex-wrap:nowrap;overflow-x:auto}
+.bit-seg{border-radius:5px;padding:8px 4px;font-size:11px;font-weight:700;text-align:center;flex-shrink:0}
+
+@media(max-width:600px){
+  .ch-head{flex-direction:column}
+  .algo-row{grid-template-columns:1fr 1fr}
+  .tab-panel{padding:16px}
+  .ch-head,.ch-tldr{padding:16px}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="nav-logo">SysDesign · Deep</span>
+  <a href="#ch4">Ch4 Rate Limiter</a>
+  <a href="#ch5">Ch5 Consistent Hashing</a>
+  <a href="#ch6">Ch6 Key-Value Store</a>
+  <a href="#ch7">Ch7 Unique ID</a>
+  <a href="#ch8">Ch8 URL Shortener</a>
+  <a href="#ch9">Ch9 Web Crawler</a>
+  <a href="#ch10">Ch10 Notifications</a>
+</nav>
+
+<div class="hero">
+  <div class="hero-tag">Alex Xu · System Design Interview · Part 1</div>
+  <h1>Chapters <em>4 – 10</em><br>Deep Dive Study Guide</h1>
+  <p>In-depth notes, architecture diagrams, trade-off analysis, and interview answer frameworks.</p>
+  <div class="hero-chips">
+    <a href="#ch4"  class="hero-chip" style="color:var(--ch4);border-color:var(--ch4);background:color-mix(in srgb,var(--ch4) 8%,transparent)">04 · Rate Limiter</a>
+    <a href="#ch5"  class="hero-chip" style="color:var(--ch5);border-color:var(--ch5);background:color-mix(in srgb,var(--ch5) 8%,transparent)">05 · Consistent Hashing</a>
+    <a href="#ch6"  class="hero-chip" style="color:var(--ch6);border-color:var(--ch6);background:color-mix(in srgb,var(--ch6) 8%,transparent)">06 · Key-Value Store</a>
+    <a href="#ch7"  class="hero-chip" style="color:var(--ch7);border-color:var(--ch7);background:color-mix(in srgb,var(--ch7) 8%,transparent)">07 · Unique ID</a>
+    <a href="#ch8"  class="hero-chip" style="color:var(--ch8);border-color:var(--ch8);background:color-mix(in srgb,var(--ch8) 8%,transparent)">08 · URL Shortener</a>
+    <a href="#ch9"  class="hero-chip" style="color:var(--ch9);border-color:var(--ch9);background:color-mix(in srgb,var(--ch9) 8%,transparent)">09 · Web Crawler</a>
+    <a href="#ch10" class="hero-chip" style="color:var(--ch10);border-color:var(--ch10);background:color-mix(in srgb,var(--ch10) 8%,transparent)">10 · Notifications</a>
+  </div>
+</div>
+
+<main>
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 4 · RATE LIMITER
+══════════════════════════════════════════ -->
+<div class="ch" id="ch4">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch4) 15%,transparent);color:var(--ch4)">04</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch4)">Design a Rate Limiter</h2>
+      <div class="sub">API throttling · Abuse prevention · Distributed counters · Redis atomicity</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> A rate limiter caps requests per user/IP per time window. Use Token Bucket or Sliding Window Counter on Redis for most cases. In distributed systems, centralize state in Redis and use Lua scripts for atomicity.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch4','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch4','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch4','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch4','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <!-- CORE -->
+    <div class="tab-panel active" id="ch4-core">
+      <div class="sec">
+        <div class="sec-title">Why Rate Limit?</div>
+        <ul class="b">
+          <li><strong>Prevent DoS/DDoS:</strong> Stop single clients from exhausting server resources</li>
+          <li><strong>Cost control:</strong> Downstream API calls (ML inference, SMS) are expensive — cap them</li>
+          <li><strong>Tier enforcement:</strong> Free plan = 100 req/day, paid = 10K/day</li>
+          <li><strong>Bot prevention:</strong> Stop credential stuffing, scraping, spam</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Where to Place It</div>
+        <ul class="b">
+          <li><strong>Client-side:</strong> <span class="note">Unreliable — client can ignore it entirely</span></li>
+          <li><strong>Server-side middleware:</strong> Most flexible; easy to change logic without touching business code</li>
+          <li class="good"><strong>API Gateway:</strong> Best if you already have one — handles TLS, auth, rate limit, logging all in one</li>
+          <li><strong>Rule:</strong> If using microservices with an API Gateway → rate limit there. Otherwise → middleware</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">5 Algorithms — Quick Reference</div>
+        <div class="algo-row">
+          <div class="acard" style="border-top-color:var(--ch4)">
+            <h4>Token Bucket</h4>
+            <p>Bucket holds N tokens. Refills at fixed rate r/sec. Each request consumes 1 token. If empty → reject.</p>
+            <div class="pros">✓ Allows bursts up to bucket size</div>
+            <div class="pros">✓ Memory efficient (just 2 vars)</div>
+            <div class="cons">✗ Tricky to tune bucket+refill rate</div>
+          </div>
+          <div class="acard" style="border-top-color:var(--ch5)">
+            <h4>Leaking Bucket</h4>
+            <p>FIFO queue. Requests enter queue; processed at fixed rate. Full queue → drop request.</p>
+            <div class="pros">✓ Smooth, stable outflow</div>
+            <div class="cons">✗ Queued old requests drain first</div>
+            <div class="cons">✗ Bursty traffic still gets delayed</div>
+          </div>
+          <div class="acard" style="border-top-color:var(--ch6)">
+            <h4>Fixed Window Counter</h4>
+            <p>Divide time into fixed windows (e.g. 1 min). Count reqs per window. Reset at boundary.</p>
+            <div class="pros">✓ Simple, low memory</div>
+            <div class="cons">✗ 2× traffic at window edge (last 30s of window + first 30s = 2×limit)</div>
+          </div>
+          <div class="acard" style="border-top-color:var(--ch7)">
+            <h4>Sliding Window Log</h4>
+            <p>Store timestamp of each request in Redis sorted set. Count entries in [now-window, now]. Reject if ≥ limit.</p>
+            <div class="pros">✓ Very accurate, no boundary spike</div>
+            <div class="cons">✗ High memory (stores all timestamps)</div>
+          </div>
+          <div class="acard" style="border-top-color:var(--ch8)">
+            <h4>Sliding Window Counter ✓</h4>
+            <p>Weight prev window: <code>count = prev_count × overlap% + curr_count</code>. Approximation but very accurate.</p>
+            <div class="pros">✓ Accurate + memory efficient</div>
+            <div class="pros">✓ Industry default (Cloudflare uses this)</div>
+          </div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">HTTP Response</div>
+        <div class="kv">
+          <div class="kv-box"><div class="k">Status Code</div><div class="v" style="color:var(--red)">429 Too Many Requests</div></div>
+          <div class="kv-box"><div class="k">X-Ratelimit-Limit</div><div class="v">Max allowed</div></div>
+          <div class="kv-box"><div class="k">X-Ratelimit-Remaining</div><div class="v">Left in window</div></div>
+          <div class="kv-box"><div class="k">Retry-After</div><div class="v">Seconds to wait</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DEEP DIVE -->
+    <div class="tab-panel" id="ch4-deep">
+      <div class="sec">
+        <div class="sec-title">Token Bucket — How It Works</div>
+        <div class="diag">
+          <div class="diag-title">Token Bucket State Machine</div>
+          <div style="display:flex;gap:20px;flex-wrap:wrap;justify-content:center;align-items:flex-start">
+            <div style="text-align:center">
+              <div style="border:2px solid var(--ch4);border-radius:8px;padding:12px 20px;font-size:12px;margin-bottom:8px">
+                <div style="color:var(--ch4);font-weight:700;margin-bottom:4px">Bucket</div>
+                <div>capacity = 4</div>
+                <div style="margin:8px 0;display:flex;gap:4px;justify-content:center">
+                  <div style="width:20px;height:20px;background:var(--ch4);border-radius:4px"></div>
+                  <div style="width:20px;height:20px;background:var(--ch4);border-radius:4px"></div>
+                  <div style="width:20px;height:20px;background:var(--ch4);border-radius:4px"></div>
+                  <div style="width:20px;height:20px;background:var(--border);border-radius:4px"></div>
+                </div>
+                <div style="font-size:11px;color:var(--muted)">tokens = 3</div>
+              </div>
+              <div style="font-size:11px;color:var(--muted)">Refiller adds 2 tokens/sec</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;font-size:12px;max-width:260px">
+              <div style="background:var(--surface);border:1px solid var(--green);border-radius:6px;padding:8px 12px">
+                <span style="color:var(--green);font-weight:700">Request arrives</span><br>
+                tokens &gt; 0 → consume 1 token → <span style="color:var(--green)">ALLOW</span>
+              </div>
+              <div style="background:var(--surface);border:1px solid var(--red);border-radius:6px;padding:8px 12px">
+                <span style="color:var(--red);font-weight:700">Bucket empty</span><br>
+                tokens = 0 → <span style="color:var(--red)">REJECT 429</span>
+              </div>
+              <div style="background:var(--surface);border:1px solid var(--ch4);border-radius:6px;padding:8px 12px">
+                <span style="color:var(--ch4);font-weight:700">Every second</span><br>
+                tokens = min(tokens + r, capacity)
+              </div>
+            </div>
+          </div>
+        </div>
+        <ul class="b">
+          <li><strong>Redis implementation:</strong> Store <code>{tokens, last_refill_time}</code> per user key</li>
+          <li><strong>Per-endpoint buckets:</strong> User may have separate buckets for /login vs /api — different limits</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Sliding Window Counter — The Formula</div>
+        <div class="hl" style="border-color:var(--ch4)">
+          <strong>Formula:</strong> <code>requests = prev_window_count × (1 − elapsed/window) + curr_window_count</code><br><br>
+          Example: limit=10/min, prev_window had 8 reqs, current window is 25% through with 3 reqs.<br>
+          <code>estimated = 8 × 0.75 + 3 = 9 → below 10 → ALLOW</code>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Distributed Rate Limiting — Problems & Solutions</div>
+        <ul class="b">
+          <li class="bad"><strong>Race condition:</strong> Two servers both read counter=4 (limit=5), both allow request → 6 total requests slip through</li>
+          <li class="good"><strong>Fix:</strong> Use Redis atomic <code>INCR</code> + Lua script — Lua runs atomically on Redis, no race</li>
+          <li class="bad"><strong>Synchronization:</strong> Multiple rate limiter nodes each have local counts → inconsistent</li>
+          <li class="good"><strong>Fix:</strong> Centralized Redis cluster as shared state — all rate limiters read/write one store</li>
+          <li><strong>Sticky sessions:</strong> Route same user to same rate limiter node. Avoids shared state but limits flexibility.</li>
+        </ul>
+        <pre><span class="c">-- Lua script: atomic check-and-increment</span>
+<span class="k">local</span> current = redis.call(<span class="s">'incr'</span>, KEYS[1])
+<span class="k">if</span> current == <span class="n">1</span> <span class="k">then</span>
+  redis.call(<span class="s">'expire'</span>, KEYS[1], ARGV[1]) <span class="c">-- set TTL on first write</span>
+<span class="k">end</span>
+<span class="k">if</span> current > tonumber(ARGV[2]) <span class="k">then</span>
+  <span class="k">return</span> <span class="n">0</span> <span class="c">-- reject</span>
+<span class="k">end</span>
+<span class="k">return</span> <span class="n">1</span> <span class="c">-- allow</span></pre>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Numbers to Remember</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch4)">2</div><div class="label">Redis vars per user (token bucket)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch4)">429</div><div class="label">HTTP status for rate limited</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch4)">~0.4%</div><div class="label">Max error in sliding window counter</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch4)">5</div><div class="label">Core algorithms to know</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DIAGRAM -->
+    <div class="tab-panel" id="ch4-diag">
+      <div class="sec">
+        <div class="sec-title">System Architecture</div>
+        <div class="diag">
+          <div class="diag-title">Rate Limiter in Middleware (Recommended)</div>
+          <div class="vstack">
+            <div class="flow-row">
+              <div class="box">Client</div>
+              <div class="arr">→</div>
+              <div class="box">Load Balancer</div>
+              <div class="arr">→</div>
+              <div class="box" style="border-color:var(--ch4);color:var(--ch4)">Rate Limiter Middleware</div>
+              <div class="arr">→</div>
+              <div class="box">API Servers</div>
+            </div>
+            <div class="arr-down">↓ reads/writes counter</div>
+            <div class="flow-row">
+              <div class="box" style="border-color:var(--teal);color:var(--teal)">Redis Cluster<br><span style="font-size:10px;font-weight:400">(shared state)</span></div>
+            </div>
+            <div style="margin-top:16px;font-size:12px;color:var(--muted);text-align:center">If limit exceeded → return 429, optionally push to message queue for async processing</div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Fixed Window vs Sliding Window — Boundary Problem</div>
+          <div style="font-size:12px;font-family:'SF Mono','Fira Code',monospace;padding:8px;background:var(--surface);border-radius:8px;line-height:2">
+            <div style="color:var(--muted)">Time →       |&lt;— window 1 (limit:5) —&gt;|&lt;— window 2 (limit:5) —&gt;|</div>
+            <div>Fixed:       <span style="color:var(--green)">████░░░░░░░░░░░░░░░░░</span><span style="color:var(--red)">█████████░░░░░░░░░</span></div>
+            <div style="color:var(--muted);font-size:11px">                  5 in w1              9 reqs in 2 sec at boundary = burst!</div>
+            <div style="margin-top:4px">Sliding:     <span style="color:var(--green)">always counts last N seconds → boundary spike eliminated</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Multi-rule Rate Limiting</div>
+        <div class="diag">
+          <div class="diag-title">Rules Engine (e.g. Kong, AWS API GW)</div>
+          <div class="flow-row" style="gap:8px;flex-wrap:wrap;justify-content:flex-start">
+            <div class="box">Request</div>
+            <div class="arr">→</div>
+            <div class="vstack" style="gap:6px">
+              <div class="box" style="font-size:11px">Rule: 5 req/sec per IP</div>
+              <div class="box" style="font-size:11px">Rule: 1000 req/day per user</div>
+              <div class="box" style="font-size:11px">Rule: 100 req/day on /login</div>
+            </div>
+            <div class="arr">→</div>
+            <div class="vstack">
+              <div class="box" style="color:var(--green)">ALL pass → Allow</div>
+              <div class="arr-down">OR</div>
+              <div class="box" style="color:var(--red)">ANY fail → 429</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INTERVIEW -->
+    <div class="tab-panel" id="ch4-iv">
+      <div class="sec">
+        <div class="sec-title">4-Step Interview Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch4) 20%,transparent);color:var(--ch4)">1</div>
+            <div class="iv-step-title">Clarify Requirements</div>
+            <div class="iv-step-time">~3 min</div>
+          </div>
+          <ul class="b">
+            <li>Client-side or server-side rate limiter?</li>
+            <li>What are we throttling — by user ID, IP, API key?</li>
+            <li>Scale: how many users, what request rate?</li>
+            <li>Single server or distributed environment?</li>
+            <li>Do we inform users when they're throttled?</li>
+          </ul>
+          <div class="speech">So to clarify — we need a server-side distributed rate limiter, throttling per user at say 1000 requests per hour, and we should return 429 with a Retry-After header. Does that sound right?</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch4) 20%,transparent);color:var(--ch4)">2</div>
+            <div class="iv-step-title">High-Level Design</div>
+            <div class="iv-step-time">~8 min</div>
+          </div>
+          <ul class="b">
+            <li>Place rate limiter as middleware between load balancer and API servers</li>
+            <li>Use Redis for shared counter storage — fast (in-memory), supports TTL</li>
+            <li>Choose algorithm: I'd go with <strong>Token Bucket</strong> (allows controlled bursts) or <strong>Sliding Window Counter</strong> (more accurate, low memory)</li>
+            <li>Return 429 + headers on rejection</li>
+          </ul>
+          <div class="speech">I'd place the rate limiter as middleware. For the algorithm, Token Bucket works well because it smooths out burst traffic while still enforcing limits. We store a counter per user in Redis with a TTL.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch4) 20%,transparent);color:var(--ch4)">3</div>
+            <div class="iv-step-title">Deep Dive</div>
+            <div class="iv-step-time">~15 min</div>
+          </div>
+          <ul class="b">
+            <li><strong>Race condition:</strong> Two nodes read counter simultaneously → use Lua script on Redis for atomicity</li>
+            <li><strong>Multiple rate limit rules:</strong> Config file with rules; middleware checks all rules, rejects on first failure</li>
+            <li><strong>Soft vs hard throttle:</strong> Soft = still allow but log; hard = reject immediately. Usually hard for security.</li>
+            <li><strong>Rate limit at different levels:</strong> IP for unauthenticated, user ID for authenticated, API key for third-party</li>
+          </ul>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch4) 20%,transparent);color:var(--ch4)">4</div>
+            <div class="iv-step-title">Wrap Up / Improvements</div>
+            <div class="iv-step-time">~4 min</div>
+          </div>
+          <ul class="b">
+            <li>Add monitoring/alerting when rejection rate spikes</li>
+            <li>Client library with retry logic (exponential backoff)</li>
+            <li>Shadow mode: log what would be throttled before enforcing — safer rollout</li>
+          </ul>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">How would you handle a DDoS attack where requests come from millions of different IPs?</div>
+          <div class="faq-a">Rate limit by user agent patterns, geographic regions, or add a CAPTCHA layer. Also consider CDN-level (Cloudflare) protection that absorbs traffic before it hits your servers.</div>
+          <div class="faq-q">Why Redis over a database for rate limiting?</div>
+          <div class="faq-a">Redis is in-memory (~sub-millisecond latency), supports atomic operations (INCR), and has built-in TTL expiry. A relational DB would add too much latency to every request.</div>
+          <div class="faq-q">What if Redis goes down?</div>
+          <div class="faq-a">Two options: fail open (allow all requests — risk abuse) or fail closed (reject all — risk availability). Most systems fail open with monitoring alerts. Can also have Redis replicas.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 5 · CONSISTENT HASHING
+══════════════════════════════════════════ -->
+<div class="ch" id="ch5">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch5) 15%,transparent);color:var(--ch5)">05</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch5)">Design Consistent Hashing</h2>
+      <div class="sub">Hash ring · Virtual nodes · Minimal remapping · Horizontal scaling</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> Consistent hashing places servers and keys on a ring. Adding/removing a server only affects k/n keys (not all). Virtual nodes fix uneven distribution. Used by DynamoDB, Cassandra, CDNs.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch5','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch5','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch5','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch5','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <div class="tab-panel active" id="ch5-core">
+      <div class="sec">
+        <div class="sec-title">The Problem with Naive Hashing</div>
+        <div class="hl" style="border-color:var(--red)">
+          <strong>Formula:</strong> <code>serverIndex = hash(key) % N</code><br>
+          If N changes (server added/removed), almost every key maps to a different server → <strong>cache invalidation storm</strong> → all requests hit DB simultaneously.
+        </div>
+        <ul class="b">
+          <li>Example: 4 servers → 5 servers. ~80% of keys remap. If those were cache keys, 80% become cache misses.</li>
+          <li>This causes a thundering herd problem — DB overload at the moment of scaling</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Consistent Hashing — Core Idea</div>
+        <ul class="b">
+          <li>Hash space is a <strong>ring</strong> from 0 to 2³²−1 (wraps around)</li>
+          <li>Both <strong>servers</strong> and <strong>keys</strong> are mapped onto the ring using the same hash function</li>
+          <li>A key is stored on the <strong>first server clockwise</strong> from its position on the ring</li>
+          <li class="good">Add server: only keys between it and its predecessor move → k/n keys remapped</li>
+          <li class="good">Remove server: only keys on that server move to next server → k/n keys remapped</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Virtual Nodes — The Fix for Uneven Distribution</div>
+        <ul class="b">
+          <li><strong>Problem:</strong> With 3 real servers, partition sizes are unequal — one server might get 50% of keys</li>
+          <li><strong>Solution:</strong> Each physical server has <strong>multiple virtual nodes</strong> (100–200) on the ring</li>
+          <li>As more virtual nodes are added, key distribution becomes more uniform (law of large numbers)</li>
+          <li class="warn"><strong>Trade-off:</strong> More virtual nodes = more even distribution but higher memory to store the ring metadata</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Where It's Used</div>
+        <table class="t">
+          <tr><th>System</th><th>How Used</th></tr>
+          <tr><td><strong>Amazon DynamoDB</strong></td><td>Partition data across storage nodes</td></tr>
+          <tr><td><strong>Apache Cassandra</strong></td><td>Distribute data across the cluster ring</td></tr>
+          <tr><td><strong>Akamai CDN</strong></td><td>Route requests to edge servers</td></tr>
+          <tr><td><strong>Discord</strong></td><td>Route messages to chat servers</td></tr>
+          <tr><td><strong>Memcached</strong></td><td>Distribute cache keys across nodes</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch5-deep">
+      <div class="sec">
+        <div class="sec-title">Step-by-Step: Adding a Server</div>
+        <ul class="b">
+          <li><strong>Before:</strong> Ring has S0, S1, S2. Key K is clockwise-assigned to S1.</li>
+          <li><strong>Add S3</strong> between S0 and S1 on the ring.</li>
+          <li><strong>Only</strong> keys that were between S0 and S3 (previously going to S1) now go to S3.</li>
+          <li>All other keys are completely unaffected — zero remapping for them.</li>
+          <li><strong>Mathematically:</strong> ~1/N fraction of keys move on average (N = number of servers)</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Replication on the Ring</div>
+        <ul class="b">
+          <li>Store key on the <strong>first N unique physical servers</strong> clockwise from the key's position</li>
+          <li>Skip virtual nodes that map to an already-selected physical server</li>
+          <li>Example: N=3 replication factor → key replicated to 3 different physical servers</li>
+          <li>This is exactly how <strong>Cassandra and Dynamo</strong> handle replication</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Hash Function Choice</div>
+        <ul class="b">
+          <li>Use <strong>MD5</strong> or <strong>SHA-1</strong> for the ring — uniform distribution matters more than security here</li>
+          <li>MurmurHash is popular in practice (faster, still uniform)</li>
+          <li>All servers and keys must use the <strong>same hash function</strong></li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Numbers to Remember</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch5)">k/n</div><div class="label">Keys remapped when 1 server changes</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch5)">2³²</div><div class="label">Size of hash ring (~4 billion)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch5)">100–200</div><div class="label">Virtual nodes per server (typical)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch5)">~80%</div><div class="label">Keys remapped with naive hashing</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch5-diag">
+      <div class="sec">
+        <div class="sec-title">Hash Ring Visualization</div>
+        <div class="diag">
+          <div class="diag-title">Consistent Hash Ring (4 servers, keys land on first server clockwise)</div>
+          <div style="display:flex;justify-content:center">
+            <div style="position:relative;width:260px;height:260px">
+              <!-- Ring -->
+              <div style="position:absolute;top:10px;left:10px;width:240px;height:240px;border-radius:50%;border:2px solid var(--border)"></div>
+              <!-- Servers -->
+              <div style="position:absolute;top:10px;left:50%;transform:translateX(-50%) translateY(-50%);background:var(--ch5);color:#000;font-size:11px;font-weight:700;padding:4px 8px;border-radius:5px">S0 (12 o'clock)</div>
+              <div style="position:absolute;right:10px;top:50%;transform:translateY(-50%) translateX(50%);background:var(--ch4);color:#000;font-size:11px;font-weight:700;padding:4px 8px;border-radius:5px">S1 (3 o'clock)</div>
+              <div style="position:absolute;bottom:10px;left:50%;transform:translateX(-50%) translateY(50%);background:var(--ch6);color:#000;font-size:11px;font-weight:700;padding:4px 8px;border-radius:5px">S2 (6 o'clock)</div>
+              <div style="position:absolute;left:10px;top:50%;transform:translateY(-50%) translateX(-50%);background:var(--ch7);color:#000;font-size:11px;font-weight:700;padding:4px 8px;border-radius:5px">S3 (9 o'clock)</div>
+              <!-- Key example -->
+              <div style="position:absolute;top:35%;left:62%;transform:translate(-50%,-50%);background:var(--surface);border:1px solid var(--accent);color:var(--accent);font-size:10px;padding:3px 7px;border-radius:4px">Key K</div>
+              <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;font-size:10px;color:var(--muted)">K goes to<br>S1 →</div>
+            </div>
+          </div>
+          <div style="text-align:center;font-size:12px;color:var(--muted);margin-top:12px">Key K is placed between S0 and S1 → assigned to <strong style="color:var(--ch4)">S1</strong> (first server clockwise)</div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Virtual Nodes — Same Physical Server, Multiple Ring Positions</div>
+          <div style="font-size:12px;font-family:'SF Mono','Fira Code',monospace;background:var(--surface);padding:14px;border-radius:8px;line-height:2;overflow-x:auto">
+            <div style="color:var(--muted)">Ring positions (0 → 360°):</div>
+            <div><span style="color:var(--ch5)">S0_v1</span>  <span style="color:var(--ch4)">S1_v1</span>  <span style="color:var(--ch5)">S0_v2</span>  <span style="color:var(--ch6)">S2_v1</span>  <span style="color:var(--ch4)">S1_v2</span>  <span style="color:var(--ch6)">S2_v2</span>  <span style="color:var(--ch5)">S0_v3</span> ...</div>
+            <div style="color:var(--muted);font-size:11px">Each physical server gets multiple slots → even distribution even with few servers</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch5-iv">
+      <div class="sec">
+        <div class="sec-title">Interview Answer Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch5) 20%,transparent);color:var(--ch5)">1</div>
+            <div class="iv-step-title">Start with the Problem</div>
+          </div>
+          <div class="speech">With naive hashing — serverIndex = hash(key) % N — adding or removing a server causes almost all keys to remap. In a cache layer, this triggers a cache storm. Consistent hashing solves this by ensuring only k/n keys need to move.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch5) 20%,transparent);color:var(--ch5)">2</div>
+            <div class="iv-step-title">Explain the Ring</div>
+          </div>
+          <div class="speech">We map both servers and keys onto a circular ring using the same hash function. A key belongs to the first server clockwise from it. When we add a server, only keys between it and its predecessor get reassigned.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch5) 20%,transparent);color:var(--ch5)">3</div>
+            <div class="iv-step-title">Address the Uneven Distribution Problem</div>
+          </div>
+          <div class="speech">With just a few servers, partitions will be unequal. We fix this with virtual nodes — each physical server gets, say, 150 positions on the ring. This makes the distribution much more uniform at the cost of slightly more metadata.</div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">How do you find which server a key belongs to efficiently?</div>
+          <div class="faq-a">Store virtual node positions in a sorted array. Use binary search to find the first position ≥ hash(key). O(log N) lookup. In Java, TreeMap.higherKey() does this natively.</div>
+          <div class="faq-q">How does Cassandra use consistent hashing?</div>
+          <div class="faq-a">Cassandra uses a token ring where each node owns a range of tokens. With virtual nodes (vnodes), each physical node owns many token ranges. Data replication copies each row to N consecutive nodes on the ring.</div>
+          <div class="faq-q">What are the downsides of consistent hashing?</div>
+          <div class="faq-a">Virtual nodes add complexity to manage. Hot key problem — one key can still overload a server if it gets hammered. Need a separate mechanism (key-based sharding or caching) for hot keys.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 6 · KEY-VALUE STORE
+══════════════════════════════════════════ -->
+<div class="ch" id="ch6">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch6) 15%,transparent);color:var(--ch6)">06</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch6)">Design a Key-Value Store</h2>
+      <div class="sub">CAP Theorem · Quorum · Vector Clocks · Gossip · LSM Tree</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> A distributed KV store partitions data via consistent hashing, replicates to N nodes, and uses W+R&gt;N quorum for consistency. Conflicts resolved by vector clocks. Gossip protocol detects failures. Write path: commit log → Memtable → SSTable.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch6','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch6','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch6','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch6','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <div class="tab-panel active" id="ch6-core">
+      <div class="sec">
+        <div class="sec-title">CAP Theorem</div>
+        <div class="hl" style="border-color:var(--ch6)">
+          A distributed system can guarantee only <strong>2 of 3</strong>: <strong>C</strong>onsistency, <strong>A</strong>vailability, <strong>P</strong>artition tolerance. Since partitions always happen in networks, real choice is <strong>CP vs AP</strong>.
+        </div>
+        <table class="t">
+          <tr><th>Choice</th><th>Behavior on Partition</th><th>Example Use Case</th><th>Example System</th></tr>
+          <tr><td><strong style="color:var(--red)">CP</strong></td><td>Return error or timeout — refuse stale reads</td><td>Bank transfers, inventory</td><td>HBase, Zookeeper</td></tr>
+          <tr><td><strong style="color:var(--green)">AP</strong></td><td>Return stale data, sync later</td><td>Social feeds, shopping carts</td><td>DynamoDB, Cassandra</td></tr>
+        </table>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Core Design Pillars</div>
+        <ul class="b">
+          <li><strong>Data Partition:</strong> Use consistent hashing to map keys to nodes. Ensures uniform distribution + minimal remapping on scale events.</li>
+          <li><strong>Replication:</strong> Copy each key to N clockwise physical servers on the ring. Typical N=3.</li>
+          <li><strong>Quorum Consensus:</strong> W + R &gt; N guarantees at least one node has the latest write.
+            <ul class="b" style="margin-top:6px">
+              <li><code>N=3, W=1, R=3</code> → fast writes, slow reads (CP-leaning)</li>
+              <li><code>N=3, W=3, R=1</code> → slow writes, fast reads</li>
+              <li><code>N=3, W=2, R=2</code> → balanced strong consistency ✓</li>
+              <li><code>W+R ≤ N</code> → eventual consistency (AP)</li>
+            </ul>
+          </li>
+          <li><strong>Consistency model:</strong> Strong (all nodes see same data), Eventual (nodes converge over time), Read-your-writes, Monotonic reads</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Failure Handling</div>
+        <ul class="b">
+          <li class="warn"><strong>Sloppy Quorum:</strong> During partition, write to first W <em>available</em> nodes (not necessarily the correct ones)</li>
+          <li><strong>Hinted Handoff:</strong> Temporary node stores the write with a hint; delivers to original node when it recovers</li>
+          <li><strong>Anti-entropy / Merkle Tree:</strong> Each node builds a Merkle tree of its data. Compare trees to find divergence without transferring all data.</li>
+          <li><strong>Gossip Protocol:</strong> Each node periodically gossips its membership list to k random nodes. Failures propagate in O(log N) rounds.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch6-deep">
+      <div class="sec">
+        <div class="sec-title">Vector Clocks — Conflict Resolution</div>
+        <div class="hl" style="border-color:var(--ch6)">
+          A vector clock is a list of <code>[server, version]</code> pairs. It tracks causality — if clock A dominates B, A is newer. If neither dominates, there's a conflict requiring resolution.
+        </div>
+        <pre><span class="c">-- Example timeline</span>
+D1([Sx,1])                     <span class="c">-- client writes to server Sx</span>
+D2([Sx,2])                     <span class="c">-- same client updates</span>
+D3([Sx,2],[Sy,1])              <span class="c">-- client updates via server Sy (branched from D2)</span>
+D4([Sx,2],[Sz,1])              <span class="c">-- different client updates via Sz (also branched from D2)</span>
+<span class="c">-- D3 and D4 conflict: neither dominates the other → push conflict to client</span></pre>
+        <ul class="b">
+          <li>Amazon's Dynamo does this — shopping cart is merged client-side when conflicts occur</li>
+          <li class="warn"><strong>Downside:</strong> Vector clocks grow large if many servers write. Can prune oldest entries with timestamp-based truncation.</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Gossip Protocol — Failure Detection</div>
+        <ul class="b">
+          <li>Each node maintains a <strong>membership list</strong>: [nodeId, heartbeat counter, last seen time]</li>
+          <li>Every second, each node increments its own heartbeat and sends its list to k=3 random nodes</li>
+          <li>If a node's heartbeat hasn't updated in threshold time → marked suspicious → then offline</li>
+          <li>Converges in O(log N) rounds — efficient for large clusters</li>
+          <li>Used by: Cassandra, DynamoDB, Riak</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">LSM Tree — Write & Read Path</div>
+        <ul class="b">
+          <li><strong>Write:</strong> Append to commit log (durability) → insert into Memtable (in-memory sorted tree) → when Memtable full, flush to SSTable on disk</li>
+          <li><strong>SSTable:</strong> Sorted String Table — immutable, sorted file. Multiple levels (L0, L1, L2…) with compaction merging them.</li>
+          <li><strong>Read:</strong> Check Bloom filter (probabilistic check — "is this key possibly in this SSTable?") → search Memtable → search SSTables from newest to oldest</li>
+          <li><strong>Bloom filter:</strong> Returns false positives but never false negatives. Eliminates disk reads for keys that don't exist.</li>
+          <li class="good">Writes are O(1) (append-only). Reads are O(log N) per SSTable level.</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Numbers to Remember</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch6)">N=3</div><div class="label">Typical replication factor</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch6)">W+R&gt;N</div><div class="label">Strong consistency condition</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch6)">W=2,R=2</div><div class="label">Balanced config for N=3</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch6)">O(log N)</div><div class="label">Gossip convergence rounds</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch6-diag">
+      <div class="sec">
+        <div class="sec-title">Write Path (LSM Tree)</div>
+        <div class="diag">
+          <div class="diag-title">Write: Client → Commit Log → Memtable → SSTable</div>
+          <div class="vstack" style="gap:8px">
+            <div class="flow-row">
+              <div class="box">Client Write</div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--ch6)">Coordinator Node</div>
+              <div class="arr">→</div>
+              <div class="box">Replica Nodes (N=3)</div>
+            </div>
+            <div style="margin:4px 0;color:var(--muted);font-size:12px;text-align:center">On each replica node:</div>
+            <div class="flow-row">
+              <div class="box" style="color:var(--yellow)">1. Commit Log<br><span style="font-size:10px;font-weight:400">(disk, durable)</span></div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--green)">2. Memtable<br><span style="font-size:10px;font-weight:400">(RAM, sorted)</span></div>
+              <div class="arr">→ full →</div>
+              <div class="box" style="color:var(--sky)">3. SSTable<br><span style="font-size:10px;font-weight:400">(disk, immutable)</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Read Path: Bloom Filter Eliminates Disk Reads</div>
+          <div class="vstack" style="gap:6px">
+            <div class="flow-row">
+              <div class="box">Read Request</div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--purple)">Bloom Filter</div>
+            </div>
+            <div class="flow-row" style="gap:20px">
+              <div class="vstack">
+                <div class="arr-down">Maybe in SSTable</div>
+                <div class="box" style="color:var(--green)">Search Memtable</div>
+                <div class="arr-down">miss →</div>
+                <div class="box" style="color:var(--sky)">Search SSTable L0→Ln</div>
+              </div>
+              <div class="vstack">
+                <div class="arr-down">Definitely not here</div>
+                <div class="box" style="color:var(--red)">Skip SSTable (no disk I/O)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Replication: N=3, Keys Replicate to Next 3 Physical Nodes on Ring</div>
+          <div style="font-size:12px;font-family:'SF Mono','Fira Code',monospace;background:var(--surface);padding:14px;border-radius:8px;line-height:2;overflow-x:auto">
+            Ring: <span style="color:var(--ch5)">S0</span> → <span style="color:var(--ch4)">S1</span> → <span style="color:var(--ch6)">S2</span> → <span style="color:var(--ch7)">S3</span> → ...<br>
+            Key K lands between S0 and S1<br>
+            <span style="color:var(--green)">Replicated to: S1 (primary), S2 (replica 1), S3 (replica 2)</span><br>
+            <span style="color:var(--muted);font-size:11px">Skip virtual nodes of same physical server when selecting replicas</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch6-iv">
+      <div class="sec">
+        <div class="sec-title">Interview Answer Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch6) 20%,transparent);color:var(--ch6)">1</div>
+            <div class="iv-step-title">Clarify Requirements</div>
+            <div class="iv-step-time">~3 min</div>
+          </div>
+          <ul class="b">
+            <li>Is this a single-server or distributed system?</li>
+            <li>What consistency level do we need — strong or eventual?</li>
+            <li>What's the data size and read/write ratio?</li>
+            <li>Latency requirements? (usually low-latency = p99 &lt; 10ms)</li>
+          </ul>
+          <div class="speech">I'll design a distributed KV store supporting 10TB of data, eventual consistency for high availability, with P99 read latency under 10ms. Is that aligned?</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch6) 20%,transparent);color:var(--ch6)">2</div>
+            <div class="iv-step-title">High-Level Design</div>
+            <div class="iv-step-time">~10 min</div>
+          </div>
+          <div class="speech">I'll partition data using consistent hashing with virtual nodes. Each key replicates to N=3 nodes clockwise. Clients can talk to any node — that node acts as coordinator. For consistency I'll use W=2, R=2 quorum (W+R=4 &gt; N=3).</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch6) 20%,transparent);color:var(--ch6)">3</div>
+            <div class="iv-step-title">Deep Dive Topics</div>
+            <div class="iv-step-time">~15 min</div>
+          </div>
+          <ul class="b">
+            <li>Explain write path: commit log → Memtable → SSTable (LSM tree)</li>
+            <li>Explain read path: Bloom filter → Memtable → SSTable levels</li>
+            <li>Conflict resolution: vector clocks + client-side merge</li>
+            <li>Failure detection: gossip protocol</li>
+            <li>Failure recovery: sloppy quorum + hinted handoff</li>
+          </ul>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">Walk me through what happens when W=2, R=2, N=3 and a node goes down.</div>
+          <div class="faq-a">With 2 nodes still up, W=2 writes still succeed. R=2 reads still succeed. We maintain consistency. If a 2nd node goes down (only 1 left), we can no longer satisfy quorum — system returns error (CP behavior) or switches to sloppy quorum (AP behavior).</div>
+          <div class="faq-q">Why use a Bloom filter for reads?</div>
+          <div class="faq-a">SSTables are immutable sorted files on disk. Reading all of them for a missing key wastes I/O. A Bloom filter is a probabilistic structure that tells us "this key is definitely NOT in this SSTable" — we skip those files entirely. It never gives false negatives, only rare false positives (extra disk reads).</div>
+          <div class="faq-q">How is Cassandra's consistency different from DynamoDB's?</div>
+          <div class="faq-a">Cassandra lets you tune consistency per query (ONE, QUORUM, ALL). DynamoDB offers eventually consistent reads by default and strongly consistent reads on request (reads from leader only). Both are AP by default but support configurable consistency.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 7 · UNIQUE ID GENERATOR
+══════════════════════════════════════════ -->
+<div class="ch" id="ch7">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch7) 15%,transparent);color:var(--ch7)">07</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch7)">Design a Unique ID Generator</h2>
+      <div class="sub">Distributed · 64-bit · Sortable · Twitter Snowflake · Clock Skew</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> Use Twitter Snowflake: 64-bit = 1 sign + 41 timestamp(ms) + 5 datacenter + 5 machine + 12 sequence. Generates 4096 IDs/ms/machine, ~4M/sec. IDs are time-sortable. Handle clock skew by pausing generation.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch7','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch7','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch7','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch7','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <div class="tab-panel active" id="ch7-core">
+      <div class="sec">
+        <div class="sec-title">Requirements</div>
+        <div class="kv">
+          <div class="kv-box"><div class="k">Unique</div><div class="v">Globally across all servers</div></div>
+          <div class="kv-box"><div class="k">Numeric</div><div class="v">64-bit integer only</div></div>
+          <div class="kv-box"><div class="k">Sortable</div><div class="v">Roughly by creation time</div></div>
+          <div class="kv-box"><div class="k">Scale</div><div class="v">10,000+ IDs per second</div></div>
+          <div class="kv-box"><div class="k">Availability</div><div class="v">High — used everywhere</div></div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">4 Approaches Compared</div>
+        <table class="t">
+          <tr><th>Approach</th><th>How</th><th>Pros</th><th>Cons</th></tr>
+          <tr>
+            <td><strong>Multi-master DB</strong></td>
+            <td>Auto-increment with step = N servers</td>
+            <td>Simple, uses existing DB</td>
+            <td>Not sortable by time, hard to add servers, not scalable across DCs</td>
+          </tr>
+          <tr>
+            <td><strong>UUID</strong></td>
+            <td>128-bit random string, generated locally</td>
+            <td>No coordination needed, very simple</td>
+            <td>128-bit (not 64), not numeric, not time-sortable, random = bad for DB index locality</td>
+          </tr>
+          <tr>
+            <td><strong>Ticket Server</strong> (Flickr)</td>
+            <td>Single centralized DB with auto-increment</td>
+            <td>Numeric, simple, proven</td>
+            <td>Single point of failure; SPOF even with 2 servers (sync issues)</td>
+          </tr>
+          <tr>
+            <td><strong>Snowflake ✓</strong></td>
+            <td>64-bit composed of timestamp + machine + sequence</td>
+            <td>Scalable, time-sortable, 64-bit numeric, no coordination</td>
+            <td>Depends on system clock; clock skew causes issues</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch7-deep">
+      <div class="sec">
+        <div class="sec-title">Snowflake Bit Layout — Deep Dive</div>
+        <div style="margin-bottom:14px">
+          <div class="bits">
+            <div class="bit-seg" style="background:color-mix(in srgb,var(--muted) 20%,transparent);color:var(--muted);width:32px">Sign<br>1 bit</div>
+            <div class="bit-seg" style="background:color-mix(in srgb,var(--ch6) 20%,transparent);color:var(--ch6);flex:41">Timestamp — 41 bits (milliseconds since custom epoch)</div>
+            <div class="bit-seg" style="background:color-mix(in srgb,var(--ch5) 20%,transparent);color:var(--ch5);width:52px">DC<br>5 bits</div>
+            <div class="bit-seg" style="background:color-mix(in srgb,var(--ch8) 20%,transparent);color:var(--ch8);width:52px">Machine<br>5 bits</div>
+            <div class="bit-seg" style="background:color-mix(in srgb,var(--ch7) 20%,transparent);color:var(--ch7);width:80px">Sequence — 12 bits</div>
+          </div>
+        </div>
+        <ul class="b">
+          <li><strong>Sign bit (1 bit):</strong> Always 0 — ensures positive 64-bit signed integer</li>
+          <li><strong>Timestamp (41 bits):</strong> Milliseconds since a custom epoch (e.g. Twitter's epoch = Nov 4 2010). Range = 2⁴¹ ms ≈ <strong>69 years</strong> of IDs</li>
+          <li><strong>Datacenter ID (5 bits):</strong> 2⁵ = <strong>32 datacenters</strong> supported</li>
+          <li><strong>Machine ID (5 bits):</strong> 2⁵ = <strong>32 machines per DC</strong> → 1,024 total machines</li>
+          <li><strong>Sequence (12 bits):</strong> Auto-increments per ms, resets to 0 each millisecond. 2¹² = <strong>4,096 IDs per ms per machine</strong> = ~4M IDs/sec/machine</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Clock Skew Problem & Solution</div>
+        <div class="hl" style="border-color:var(--ch7)">
+          <strong>Problem:</strong> NTP adjusts system clocks. If clock moves backward, machine could generate duplicate IDs (same timestamp + same sequence number as a prior ID).<br><br>
+          <strong>Solution:</strong> When <code>currentTimestamp &lt; lastTimestamp</code>, refuse to generate IDs and wait until clock catches up. Log a warning. In severe cases, alert ops.
+        </div>
+        <ul class="b">
+          <li>Twitter's Snowflake used NTP with a max drift of 10ms — anything beyond that caused the server to refuse requests</li>
+          <li>Modern systems use Google's TrueTime (with uncertainty bounds) to handle this more elegantly</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Numbers to Remember</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch7)">69 yrs</div><div class="label">Lifespan of 41-bit timestamp</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch7)">4,096</div><div class="label">IDs per millisecond per machine</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch7)">1,024</div><div class="label">Max machines (32 DC × 32 machine)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch7)">~4M</div><div class="label">IDs per second per machine</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch7-diag">
+      <div class="sec">
+        <div class="sec-title">Snowflake ID Generation Flow</div>
+        <div class="diag">
+          <div class="diag-title">ID Generation per Request</div>
+          <div class="vstack" style="gap:8px">
+            <div class="flow-row">
+              <div class="box">Request for ID</div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--ch7)">Snowflake Service<br><span style="font-size:10px;font-weight:400">(one per machine)</span></div>
+            </div>
+            <div class="arr-down">↓</div>
+            <div class="flow-row" style="gap:10px;flex-wrap:wrap">
+              <div class="box" style="font-size:11px">Get current ms timestamp</div>
+              <div class="arr">+</div>
+              <div class="box" style="font-size:11px">DC ID (config)</div>
+              <div class="arr">+</div>
+              <div class="box" style="font-size:11px">Machine ID (config)</div>
+              <div class="arr">+</div>
+              <div class="box" style="font-size:11px">Sequence++ (atomic)</div>
+            </div>
+            <div class="arr-down">↓</div>
+            <div class="flow-row">
+              <div class="box" style="color:var(--green)">64-bit ID returned</div>
+            </div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Approach Comparison — When to Use What</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="acard" style="border-top-color:var(--ch7)">
+              <h4 style="color:var(--ch7)">Use Snowflake when:</h4>
+              <ul class="b">
+                <li>Need 64-bit numeric IDs</li>
+                <li>Need time-sortable IDs</li>
+                <li>Distributed multi-DC setup</li>
+                <li>High throughput (&gt;10K/sec)</li>
+              </ul>
+            </div>
+            <div class="acard" style="border-top-color:var(--muted)">
+              <h4>Use UUID when:</h4>
+              <ul class="b">
+                <li>Simple single-service</li>
+                <li>No sortability needed</li>
+                <li>Can tolerate 128-bit strings</li>
+                <li>Want zero dependencies</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch7-iv">
+      <div class="sec">
+        <div class="sec-title">Interview Answer Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch7) 20%,transparent);color:var(--ch7)">1</div>
+            <div class="iv-step-title">Clarify & Enumerate Options</div>
+            <div class="iv-step-time">~5 min</div>
+          </div>
+          <div class="speech">Before jumping to a solution, let me walk through four approaches and their trade-offs: multi-master DB increment, UUID, Ticket Server, and Twitter Snowflake. Given you need 64-bit numeric sortable IDs at scale, Snowflake is the right choice.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch7) 20%,transparent);color:var(--ch7)">2</div>
+            <div class="iv-step-title">Explain Snowflake Bit Layout</div>
+            <div class="iv-step-time">~8 min</div>
+          </div>
+          <div class="speech">The 64-bit ID is composed of: 1 sign bit (always 0), 41 bits of millisecond timestamp since a custom epoch giving us 69 years, 5 bits for datacenter ID (32 DCs), 5 bits for machine ID (32 machines per DC), and 12 sequence bits resetting each ms giving 4096 IDs per ms per machine.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch7) 20%,transparent);color:var(--ch7)">3</div>
+            <div class="iv-step-title">Address Clock Skew</div>
+            <div class="iv-step-time">~5 min</div>
+          </div>
+          <div class="speech">The main risk is clock skew — if NTP adjusts the clock backward, we could generate duplicate timestamps. The solution: track lastTimestamp, and if currentTimestamp is less, wait until clocks realign before generating more IDs.</div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">What if we run out of sequence numbers in a millisecond?</div>
+          <div class="faq-a">At 4096 IDs/ms/machine, hitting this limit requires generating more than 4M IDs per second per machine — effectively impossible in normal operation. If somehow hit, we wait for the next millisecond (sleep 1ms).</div>
+          <div class="faq-q">How do you assign datacenter and machine IDs?</div>
+          <div class="faq-a">They're set at startup via config or service discovery (e.g. ZooKeeper assigns unique machine IDs). They're hardcoded per deployment, not randomly generated — that's key to why there are no collisions without coordination at runtime.</div>
+          <div class="faq-q">Can we extend Snowflake for a longer lifespan?</div>
+          <div class="faq-a">Yes — trade bits between fields. E.g. steal 2 bits from DC and machine fields to add to timestamp → 43-bit timestamp = ~278 years. Or use a different epoch start date to push the expiry further out.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 8 · URL SHORTENER
+══════════════════════════════════════════ -->
+<div class="ch" id="ch8">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch8) 15%,transparent);color:var(--ch8)">08</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch8)">Design a URL Shortener</h2>
+      <div class="sub">Base62 Encoding · 301 vs 302 · LRU Cache · DB Schema · Read-heavy</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> Generate a unique 64-bit ID (Snowflake), encode it in base62 to get a 7-char short URL. Store mapping in DB. Cache hot URLs with LRU. Redirect with 302 for analytics, 301 for performance. Read:write ratio ~100:1.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch8','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch8','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch8','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch8','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <div class="tab-panel active" id="ch8-core">
+      <div class="sec">
+        <div class="sec-title">API Design</div>
+        <ul class="b">
+          <li><strong>Shorten:</strong> <code>POST /api/v1/data/shorten</code> body: <code>{"longUrl":"https://..."}</code> → returns <code>{"shortUrl":"https://short.ly/abc1234"}</code></li>
+          <li><strong>Redirect:</strong> <code>GET /{shortCode}</code> → HTTP redirect to original URL</li>
+          <li><strong>Delete (optional):</strong> <code>DELETE /api/v1/{shortCode}</code></li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">301 vs 302 Redirect</div>
+        <table class="t">
+          <tr><th>Code</th><th>Meaning</th><th>Browser Caches?</th><th>Server Load</th><th>Choose When</th></tr>
+          <tr><td><strong style="color:var(--green)">301</strong></td><td>Permanent redirect</td><td>Yes — after first visit, browser goes direct</td><td>Low (browser handles)</td><td>Performance matters, don't need analytics</td></tr>
+          <tr><td><strong style="color:var(--yellow)">302</strong></td><td>Temporary redirect</td><td>No — every click hits your server</td><td>High</td><td>Need click analytics, A/B testing, expiry</td></tr>
+        </table>
+        <div class="hl" style="border-color:var(--ch8);margin-top:10px">If analytics (click count, geo, device) are important → use <strong>302</strong>. If minimizing server load is the priority → use <strong>301</strong>.</div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Two Hashing Strategies</div>
+        <table class="t">
+          <tr><th>Strategy</th><th>How</th><th>Pros</th><th>Cons</th></tr>
+          <tr>
+            <td><strong>Hash + Collision Resolution</strong></td>
+            <td>CRC32/MD5 → take first 7 chars. On collision, append string and rehash.</td>
+            <td>Deterministic (same URL → same short code)</td>
+            <td>Must query DB on every write to detect collision; slower</td>
+          </tr>
+          <tr>
+            <td><strong>Base62 Encoding ✓</strong></td>
+            <td>Generate unique ID (Snowflake) → convert to base62</td>
+            <td>No collision possible; no DB check needed; time-ordered</td>
+            <td>Different short codes for same long URL (no dedup by default)</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch8-deep">
+      <div class="sec">
+        <div class="sec-title">Base62 Encoding — How It Works</div>
+        <div class="hl" style="border-color:var(--ch8)">
+          Alphabet: <code>0-9a-zA-Z</code> = 62 characters. A 7-character base62 string = 62⁷ ≈ <strong>3.5 trillion</strong> unique URLs — enough for centuries.
+        </div>
+        <pre><span class="c">-- Convert integer ID to base62 string</span>
+<span class="k">def</span> <span class="s">encode</span>(id):
+    chars = <span class="s">"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"</span>
+    result = []
+    <span class="k">while</span> id > <span class="n">0</span>:
+        result.append(chars[id % <span class="n">62</span>])
+        id //= <span class="n">62</span>
+    <span class="k">return</span> <span class="s">''</span>.join(reversed(result)).zfill(<span class="n">7</span>)
+<span class="c">-- Example: ID 2009215674938 → "zn9edcu"</span></pre>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Database Schema</div>
+        <pre><span class="k">CREATE TABLE</span> url_mappings (
+  id          BIGINT PRIMARY KEY,         <span class="c">-- Snowflake ID</span>
+  short_url   VARCHAR(7)  NOT NULL UNIQUE, <span class="c">-- base62 encoded</span>
+  long_url    TEXT        NOT NULL,
+  user_id     BIGINT,
+  created_at  DATETIME    NOT NULL,
+  expires_at  DATETIME,
+  click_count INT DEFAULT 0
+);
+<span class="k">INDEX</span> ON short_url;  <span class="c">-- primary read pattern</span>
+<span class="k">INDEX</span> ON user_id;    <span class="c">-- user's own URLs</span></pre>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Caching Strategy</div>
+        <ul class="b">
+          <li>Read:write ratio is ~100:1 — optimize heavily for reads</li>
+          <li><strong>Cache layer (Redis):</strong> Store <code>shortCode → longUrl</code>. Evict with LRU.</li>
+          <li><strong>80/20 rule:</strong> 20% of URLs generate 80% of traffic. Cache the hot 20%.</li>
+          <li>If cache miss → query DB → update cache</li>
+          <li>Cache capacity: 10M daily active URLs × 100 bytes avg = ~1 GB — fits in Redis easily</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Capacity Estimation</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch8)">100M</div><div class="label">URL shortenings per day</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch8)">1,160</div><div class="label">Write requests per second</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch8)">116K</div><div class="label">Read req/sec (100:1 ratio)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch8)">365 TB</div><div class="label">Storage over 10 years (500 bytes/URL)</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch8-diag">
+      <div class="sec">
+        <div class="sec-title">Full System Architecture</div>
+        <div class="diag">
+          <div class="diag-title">Write Flow — Create Short URL</div>
+          <div class="vstack" style="gap:6px">
+            <div class="flow-row">
+              <div class="box">POST /shorten<br><span style="font-size:10px;font-weight:400">longUrl</span></div>
+              <div class="arr">→</div>
+              <div class="box">Load Balancer</div>
+              <div class="arr">→</div>
+              <div class="box">Web Server</div>
+            </div>
+            <div class="arr-down">↓</div>
+            <div class="flow-row" style="gap:10px">
+              <div class="box" style="color:var(--ch7)">ID Generator<br><span style="font-size:10px;font-weight:400">(Snowflake)</span></div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--ch8)">Base62 Encode<br><span style="font-size:10px;font-weight:400">ID → shortCode</span></div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--green)">Store in DB<br><span style="font-size:10px;font-weight:400">(shortCode, longUrl)</span></div>
+            </div>
+            <div class="arr-down">↓</div>
+            <div class="flow-row">
+              <div class="box" style="color:var(--ch8)">Return shortUrl to user</div>
+            </div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Read Flow — Redirect</div>
+          <div class="vstack" style="gap:6px">
+            <div class="flow-row">
+              <div class="box">GET /abc1234</div>
+              <div class="arr">→</div>
+              <div class="box">Load Balancer</div>
+              <div class="arr">→</div>
+              <div class="box">Web Server</div>
+            </div>
+            <div class="arr-down">↓ lookup shortCode</div>
+            <div class="flow-row" style="gap:16px">
+              <div class="vstack">
+                <div class="box" style="color:var(--teal)">Redis Cache</div>
+                <div class="arr-down">HIT ↓</div>
+                <div class="box" style="color:var(--green)">302 Redirect →<br>longUrl</div>
+              </div>
+              <div style="color:var(--faint);padding-top:20px">MISS →</div>
+              <div class="vstack">
+                <div class="box" style="color:var(--ch6)">MySQL / NoSQL DB</div>
+                <div class="arr-down">↓ update cache</div>
+                <div class="box" style="color:var(--green)">302 Redirect →<br>longUrl</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch8-iv">
+      <div class="sec">
+        <div class="sec-title">Interview Answer Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch8) 20%,transparent);color:var(--ch8)">1</div>
+            <div class="iv-step-title">Clarify + Estimate</div>
+            <div class="iv-step-time">~5 min</div>
+          </div>
+          <div class="speech">How many URLs per day — say 100 million? That's 1,160 writes/sec. With 100:1 read ratio, ~116,000 reads/sec. We'll need a read-optimized design with caching. URLs can be up to 2KB, so 10 years × 100M × 500 bytes ≈ 365 TB storage.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch8) 20%,transparent);color:var(--ch8)">2</div>
+            <div class="iv-step-title">Core Design Decision — Hashing</div>
+            <div class="iv-step-time">~8 min</div>
+          </div>
+          <div class="speech">I'll use base62 encoding over hash-then-truncate because it avoids collision checks. Generate a Snowflake ID, encode in base62 to get 7 characters — 62⁷ = 3.5 trillion unique codes. This also gives us time-ordered short URLs for free.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch8) 20%,transparent);color:var(--ch8)">3</div>
+            <div class="iv-step-title">Address 301 vs 302</div>
+          </div>
+          <div class="speech">If analytics are required — tracking clicks, geo, device — we must use 302 so every redirect hits our server. If we want to minimize load and don't need tracking, 301 lets browsers cache the redirect and go direct.</div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">How do you handle custom short codes like short.ly/myBrand?</div>
+          <div class="faq-a">Add a custom_alias column to the DB. On write, check if alias is taken (unique constraint). If not taken, store it. If taken, return a conflict error. Custom aliases bypass base62 encoding — they're stored as-is.</div>
+          <div class="faq-q">How do you scale reads to 100K+ req/sec?</div>
+          <div class="faq-a">Multiple layers: CDN for the redirect response itself (if using 301), Redis cache with LRU eviction, read replicas on the DB for cache misses. The cache hit rate should be ~80%+ for hot URLs so DB barely gets touched.</div>
+          <div class="faq-q">How do you handle URL expiration?</div>
+          <div class="faq-a">Store expires_at in the DB. On read, check if expired — return 404 if so. Use a background cleanup job (cron) to delete expired rows periodically. Can also use Redis TTL on cached entries.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 9 · WEB CRAWLER
+══════════════════════════════════════════ -->
+<div class="ch" id="ch9">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch9) 15%,transparent);color:var(--ch9)">09</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch9)">Design a Web Crawler</h2>
+      <div class="sub">BFS · URL Frontier · Politeness · Deduplication · Spider Traps</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> A crawler does BFS from seed URLs. URL Frontier has priority queues (front) + per-domain politeness queues (back). Deduplicate URLs with Bloom filter + hash set. Deduplicate content with SHA-256. Respect robots.txt. Handle spider traps with URL depth limits.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch9','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch9','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch9','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch9','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <div class="tab-panel active" id="ch9-core">
+      <div class="sec">
+        <div class="sec-title">Use Cases & Scale</div>
+        <ul class="b">
+          <li><strong>Search engine indexing:</strong> Google crawls ~15B pages continuously</li>
+          <li><strong>Web archiving:</strong> Internet Archive wayback machine</li>
+          <li><strong>Data mining:</strong> Price comparison, research datasets</li>
+          <li><strong>Link checking:</strong> Detect broken links, copyright violations</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Core Components</div>
+        <ul class="b">
+          <li><strong>Seed URLs:</strong> Starting points — usually high-PageRank domains or sitemaps</li>
+          <li><strong>URL Frontier:</strong> Queue of URLs to crawl. Split into front queues (priority) + back queues (politeness, one per domain)</li>
+          <li><strong>HTML Downloader:</strong> Fetches pages. Checks robots.txt cache first. Respects crawl-delay.</li>
+          <li><strong>DNS Resolver:</strong> Cached (TTL ~1–5min) to avoid DNS lookup on every page</li>
+          <li><strong>Content Parser:</strong> Parse and validate HTML. Reject malformed or non-HTML content.</li>
+          <li><strong>Content Seen? (Dedup):</strong> Hash the body (SHA-256). If hash exists in store → skip. Avoids storing duplicate pages with different URLs.</li>
+          <li><strong>Link Extractor:</strong> Extract all hrefs. Resolve relative URLs to absolute.</li>
+          <li><strong>URL Filter:</strong> Remove blacklisted domains, non-HTML files, already-crawled URLs</li>
+          <li><strong>URL Seen? (Dedup):</strong> Bloom filter (fast, probabilistic) + hash set (exact). If URL seen → don't re-enqueue.</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Politeness Rules</div>
+        <ul class="b">
+          <li>Always check and obey <code>robots.txt</code> — defines disallowed paths per user-agent</li>
+          <li>Cache robots.txt per domain (re-check every few days)</li>
+          <li>Add <strong>crawl delay</strong> between requests to same domain (e.g. 1–2 seconds)</li>
+          <li>Use a per-domain queue — one back queue per host, ensure only one request in-flight per domain</li>
+          <li>Identify yourself honestly in User-Agent header</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch9-deep">
+      <div class="sec">
+        <div class="sec-title">URL Frontier — Priority + Politeness</div>
+        <div class="hl" style="border-color:var(--ch9)">
+          URL Frontier has two tiers: <strong>Front queues</strong> (prioritization — high PageRank goes to queue 1, low to queue N) and <strong>Back queues</strong> (politeness — one queue per hostname, ensures crawl delay between requests to same site).
+        </div>
+        <ul class="b">
+          <li><strong>Prioritizer:</strong> Assigns priority score based on PageRank, update frequency, traffic. High priority → dequeued more often.</li>
+          <li><strong>Back queue router:</strong> Maps each hostname to a dedicated queue. Worker picks a non-empty back queue whose domain's next-crawl-time has passed.</li>
+          <li><strong>Queue selector:</strong> Maintains a heap sorted by next-allowed-crawl-time per domain.</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Spider Traps & Solutions</div>
+        <table class="t">
+          <tr><th>Problem</th><th>Example</th><th>Solution</th></tr>
+          <tr><td><strong>Infinite URLs</strong></td><td>Calendar: /cal?date=next → infinite pages</td><td>Cap max URL depth (e.g. depth ≤ 10)</td></tr>
+          <tr><td><strong>URL length explosion</strong></td><td>/a/b/c/d/.../z (very long paths)</td><td>Reject URLs longer than 2048 chars</td></tr>
+          <tr><td><strong>Duplicate content</strong></td><td>Same page at http and https</td><td>Normalize URLs (canonical form) before queuing</td></tr>
+          <tr><td><strong>Cyclic redirects</strong></td><td>A → B → A</td><td>Track visited URLs; detect cycle after N hops</td></tr>
+        </table>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Distributed Crawling</div>
+        <ul class="b">
+          <li>Run multiple crawl servers; partition URLs across servers by domain using consistent hashing</li>
+          <li>Each server owns a set of domains — ensures politeness constraints are respected per server</li>
+          <li>URL Frontier persisted to disk/storage (e.g. Kafka) — survive server restarts</li>
+          <li>Use <strong>SimHash</strong> for near-duplicate detection (fuzzy content comparison, not exact)</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Numbers to Remember</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch9)">~15B</div><div class="label">Pages Google crawls</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch9)">1–2s</div><div class="label">Politeness delay per domain</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch9)">2048</div><div class="label">Max URL length (chars)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch9)">BFS</div><div class="label">Traversal (not DFS — avoids deep traps)</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch9-diag">
+      <div class="sec">
+        <div class="sec-title">Full Crawl Pipeline</div>
+        <div class="diag">
+          <div class="diag-title">Web Crawler Architecture</div>
+          <div class="vstack" style="gap:10px">
+            <div class="flow-row">
+              <div class="box" style="color:var(--ch9)">Seed URLs</div>
+              <div class="arr">→</div>
+              <div class="box">URL Frontier<br><span style="font-size:10px;font-weight:400">priority + politeness queues</span></div>
+              <div class="arr">→</div>
+              <div class="box">HTML Downloader</div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);text-align:center">↑ checks robots.txt cache + DNS cache</div>
+            <div class="flow-row">
+              <div class="box">Content Parser</div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--purple)">Content Seen?<br><span style="font-size:10px;font-weight:400">SHA-256 hash check</span></div>
+              <div class="arr">new →</div>
+              <div class="box" style="color:var(--green)">Content Storage</div>
+            </div>
+            <div class="arr-down">↓ also</div>
+            <div class="flow-row">
+              <div class="box">Link Extractor</div>
+              <div class="arr">→</div>
+              <div class="box">URL Filter<br><span style="font-size:10px;font-weight:400">blacklist, type</span></div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--purple)">URL Seen?<br><span style="font-size:10px;font-weight:400">Bloom filter + hash</span></div>
+              <div class="arr">new →</div>
+              <div class="box" style="color:var(--ch9)">URL Frontier</div>
+            </div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">URL Frontier — Two-Tier Queue System</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+            <div>
+              <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Front Queues (Priority)</div>
+              <div class="vstack" style="gap:4px">
+                <div class="box" style="font-size:11px;color:var(--green)">Queue 1 — High Priority</div>
+                <div class="box" style="font-size:11px;color:var(--yellow)">Queue 2 — Medium</div>
+                <div class="box" style="font-size:11px;color:var(--muted)">Queue N — Low Priority</div>
+              </div>
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Back Queues (Politeness)</div>
+              <div class="vstack" style="gap:4px">
+                <div class="box" style="font-size:11px">Queue: wikipedia.org</div>
+                <div class="box" style="font-size:11px">Queue: github.com</div>
+                <div class="box" style="font-size:11px">Queue: example.com</div>
+              </div>
+            </div>
+          </div>
+          <div style="margin-top:10px;font-size:11.5px;color:var(--muted);text-align:center">Workers pull from back queues. Heap tracks next-allowed-crawl-time per domain.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch9-iv">
+      <div class="sec">
+        <div class="sec-title">Interview Answer Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch9) 20%,transparent);color:var(--ch9)">1</div>
+            <div class="iv-step-title">Clarify Scope</div>
+            <div class="iv-step-time">~3 min</div>
+          </div>
+          <ul class="b">
+            <li>What's the scale — 1B pages? 15B like Google?</li>
+            <li>HTML only or also PDFs, images?</li>
+            <li>How fresh should content be — daily re-crawl?</li>
+            <li>Do we need to store content or just the index?</li>
+          </ul>
+          <div class="speech">I'll design a crawler for 1 billion pages, HTML only, targeting freshness of ~2 weeks per page, storing content for indexing.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch9) 20%,transparent);color:var(--ch9)">2</div>
+            <div class="iv-step-title">Walk Through Components</div>
+            <div class="iv-step-time">~12 min</div>
+          </div>
+          <div class="speech">Start with seed URLs going into the URL Frontier. The frontier has two tiers — front queues for priority, back queues for politeness. Workers pull URLs, check robots.txt, fetch HTML, parse content, deduplicate on content hash, extract new links, filter and deduplicate URLs, then re-enqueue.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch9) 20%,transparent);color:var(--ch9)">3</div>
+            <div class="iv-step-title">Cover Edge Cases Proactively</div>
+          </div>
+          <div class="speech">Key edge cases: spider traps (infinite URL generation) — handle with URL depth limits. Duplicate content — SHA-256 hash of body. Clock skew across distributed workers — use central URL store. Robots.txt changes — re-fetch periodically, cache with TTL.</div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">Why BFS over DFS for crawling?</div>
+          <div class="faq-a">DFS can go arbitrarily deep into one branch — perfect for spider traps (infinite /next links). BFS explores breadth-first, ensuring you cover a wide range of pages at each depth level before going deeper. Also easier to implement politeness constraints.</div>
+          <div class="faq-q">How do you prioritize which pages to crawl first?</div>
+          <div class="faq-a">Multiple signals: PageRank (linked-to more = more important), update frequency (check HTTP Last-Modified headers), page freshness (when was it last crawled vs when it might have changed), and explicit sitemaps from site owners.</div>
+          <div class="faq-q">How would you scale to crawl 1 billion pages in 1 month?</div>
+          <div class="faq-a">1B pages / 30 days / 86400 sec = ~386 pages/sec per worker. With 1 second politeness delay per domain and say 1000 distinct domains queued = 1000 concurrent domain queues. ~400 crawl workers should handle this. Use Kafka for the URL frontier, S3 for content storage, distributed Bloom filter (Redis) for URL dedup.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     CHAPTER 10 · NOTIFICATION SYSTEM
+══════════════════════════════════════════ -->
+<div class="ch" id="ch10">
+  <div class="ch-head">
+    <div class="ch-num" style="background:color-mix(in srgb,var(--ch10) 15%,transparent);color:var(--ch10)">10</div>
+    <div class="ch-info">
+      <h2 style="color:var(--ch10)">Design a Notification System</h2>
+      <div class="sub">Push · SMS · Email · Message Queues · Reliability · Deduplication</div>
+    </div>
+  </div>
+  <div class="ch-tldr"><strong>TL;DR</strong> One queue per channel (iOS, Android, SMS, Email). Workers call 3rd-party providers (APNs, FCM, Twilio, SendGrid). Persist every notification before queuing. Retry with backoff. Deduplicate with idempotency keys. Respect per-user opt-out settings.</div>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(this,'ch10','core')">Core Concepts</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch10','deep')">Deep Dive</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch10','diag')">Architecture</button>
+    <button class="tab-btn" onclick="switchTab(this,'ch10','iv')">Interview Guide</button>
+  </div>
+  <div class="tab-panels">
+
+    <div class="tab-panel active" id="ch10-core">
+      <div class="sec">
+        <div class="sec-title">Notification Types & Providers</div>
+        <table class="t">
+          <tr><th>Type</th><th>Provider</th><th>Identifier</th><th>Payload Limit</th></tr>
+          <tr><td><strong>iOS Push</strong></td><td>Apple APNs</td><td>Device token</td><td>4 KB</td></tr>
+          <tr><td><strong>Android Push</strong></td><td>Google FCM</td><td>Registration token</td><td>4 KB</td></tr>
+          <tr><td><strong>SMS</strong></td><td>Twilio, Nexmo, SNS</td><td>Phone number</td><td>160 chars (GSM)</td></tr>
+          <tr><td><strong>Email</strong></td><td>SendGrid, Mailchimp</td><td>Email address</td><td>Unlimited</td></tr>
+        </table>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Core Flow</div>
+        <ul class="b">
+          <li><strong>Services</strong> (order service, auth service, etc.) call Notification Service API to trigger a notification</li>
+          <li><strong>Notification Service</strong> validates input, fetches user device tokens and settings, builds payload, persists to DB, then enqueues to appropriate channel queue</li>
+          <li><strong>Workers</strong> (one set per channel) pull from queues and call 3rd-party APIs</li>
+          <li><strong>Separate queues per channel</strong> so a slow SMS provider doesn't block push notifications</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Reliability Principles</div>
+        <ul class="b">
+          <li class="good"><strong>Persist before enqueue:</strong> Save to DB first, then push to queue. On crash, can re-enqueue from DB.</li>
+          <li class="good"><strong>Retry on failure:</strong> If 3rd-party returns 5xx, retry with exponential backoff (1s, 2s, 4s, 8s…)</li>
+          <li class="good"><strong>Idempotency key:</strong> Each notification has a unique eventId. Workers check if already delivered before sending — prevents duplicate notifications on retry.</li>
+          <li class="warn"><strong>At-least-once delivery:</strong> May deliver twice on retry. Idempotency at consumer side handles this.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch10-deep">
+      <div class="sec">
+        <div class="sec-title">Device Registration Flow</div>
+        <ul class="b">
+          <li>On app install, device registers with APNs/FCM and receives a <strong>device token</strong></li>
+          <li>App sends token + user_id to your backend → stored in user_devices table</li>
+          <li>Tokens expire or rotate → app must update token on each launch</li>
+          <li>Store multiple tokens per user (multiple devices, multiple apps)</li>
+        </ul>
+        <pre><span class="c">-- Device table schema</span>
+<span class="k">CREATE TABLE</span> user_devices (
+  id          BIGINT PRIMARY KEY,
+  user_id     BIGINT NOT NULL,
+  device_token VARCHAR(200) NOT NULL,
+  platform    ENUM(<span class="s">'ios'</span>, <span class="s">'android'</span>, <span class="s">'web'</span>),
+  app_version VARCHAR(20),
+  created_at  DATETIME,
+  updated_at  DATETIME
+);</pre>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Notification Settings — Opt-Out</div>
+        <ul class="b">
+          <li>Every notification should check user's preferences before sending</li>
+          <li>Settings table: <code>(user_id, channel, notification_type, enabled)</code></li>
+          <li>Types: marketing, transactional, security alerts, social. Users can disable marketing but not security.</li>
+          <li class="warn"><strong>Never skip opt-out check</strong> — violating preferences is a legal and trust issue (GDPR, CAN-SPAM)</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Rate Limiting Notifications</div>
+        <ul class="b">
+          <li>Cap at e.g. 3 marketing emails/day per user to prevent spam fatigue</li>
+          <li>Use the same Redis Token Bucket or Sliding Window Counter as Ch4</li>
+          <li>Priority tiers: security alerts bypass limits, marketing obeys strict limits</li>
+          <li>Notification templates reduce duplication and allow A/B testing copy</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Analytics & Monitoring</div>
+        <ul class="b">
+          <li>Track: sent, delivered, opened, clicked, unsubscribed per notification</li>
+          <li>Webhook callbacks from APNs/FCM/Twilio report delivery status → update DB</li>
+          <li>Alert on: delivery failure rate spikes, queue depth growing, 3rd-party latency</li>
+          <li>Dead letter queue (DLQ) for permanently failed notifications — investigate manually</li>
+        </ul>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Numbers to Remember</div>
+        <div class="nums">
+          <div class="num-card"><div class="big" style="color:var(--ch10)">4 KB</div><div class="label">APNs / FCM payload limit</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch10)">160</div><div class="label">SMS characters (GSM-7)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch10)">4</div><div class="label">Separate queues (iOS/Android/SMS/Email)</div></div>
+          <div class="num-card"><div class="big" style="color:var(--ch10)">≥1×</div><div class="label">Delivery guarantee (at-least-once)</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch10-diag">
+      <div class="sec">
+        <div class="sec-title">Full System Architecture</div>
+        <div class="diag">
+          <div class="diag-title">End-to-End Notification Flow</div>
+          <div class="vstack" style="gap:8px">
+            <div class="flow-row" style="flex-wrap:wrap;gap:8px">
+              <div class="box" style="font-size:11px">Order Svc</div>
+              <div class="box" style="font-size:11px">Auth Svc</div>
+              <div class="box" style="font-size:11px">Social Svc</div>
+            </div>
+            <div class="arr-down">↓ trigger notification</div>
+            <div class="flow-row">
+              <div class="box" style="color:var(--ch10)">Notification Service<br><span style="font-size:10px;font-weight:400">validate → fetch settings → persist → enqueue</span></div>
+            </div>
+            <div class="arr-down">↓ fan-out to channel queues</div>
+            <div class="flow-row" style="gap:8px;flex-wrap:wrap">
+              <div class="vstack">
+                <div class="box" style="font-size:11px;color:var(--sky)">iOS Queue</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px">iOS Worker</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px;color:var(--sky)">APNs</div>
+              </div>
+              <div class="vstack">
+                <div class="box" style="font-size:11px;color:var(--green)">Android Queue</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px">Android Worker</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px;color:var(--green)">FCM</div>
+              </div>
+              <div class="vstack">
+                <div class="box" style="font-size:11px;color:var(--yellow)">SMS Queue</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px">SMS Worker</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px;color:var(--yellow)">Twilio</div>
+              </div>
+              <div class="vstack">
+                <div class="box" style="font-size:11px;color:var(--purple)">Email Queue</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px">Email Worker</div>
+                <div class="arr-down">↓</div>
+                <div class="box" style="font-size:11px;color:var(--purple)">SendGrid</div>
+              </div>
+            </div>
+            <div style="margin-top:4px;font-size:11.5px;color:var(--muted);text-align:center">All channels → User devices</div>
+          </div>
+        </div>
+        <div class="diag">
+          <div class="diag-title">Retry Flow with Idempotency</div>
+          <div class="vstack" style="gap:6px">
+            <div class="flow-row">
+              <div class="box">Worker dequeues msg</div>
+              <div class="arr">→</div>
+              <div class="box" style="color:var(--ch10)">Check idempotency key<br><span style="font-size:10px;font-weight:400">already delivered?</span></div>
+            </div>
+            <div class="flow-row" style="gap:20px">
+              <div class="vstack">
+                <div class="arr-down">YES</div>
+                <div class="box" style="color:var(--muted)">Skip (ack message)</div>
+              </div>
+              <div class="vstack">
+                <div class="arr-down">NO</div>
+                <div class="box">Call 3rd-party API</div>
+                <div class="flow-row" style="gap:12px;margin-top:4px">
+                  <div class="vstack"><div class="arr-down">2xx</div><div class="box" style="color:var(--green)">Mark delivered</div></div>
+                  <div class="vstack"><div class="arr-down">5xx</div><div class="box" style="color:var(--red)">Re-enqueue + backoff</div></div>
+                  <div class="vstack"><div class="arr-down">4xx</div><div class="box" style="color:var(--yellow)">Dead letter queue</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="ch10-iv">
+      <div class="sec">
+        <div class="sec-title">Interview Answer Framework</div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch10) 20%,transparent);color:var(--ch10)">1</div>
+            <div class="iv-step-title">Clarify Notification Types</div>
+            <div class="iv-step-time">~3 min</div>
+          </div>
+          <ul class="b">
+            <li>Which channels — iOS push, Android push, SMS, email?</li>
+            <li>What triggers — user actions, scheduled, real-time events?</li>
+            <li>Scale — 10M notifications/day? 1B?</li>
+            <li>Do we need analytics (delivery, open rates)?</li>
+          </ul>
+          <div class="speech">I'll design a system supporting all four channels — iOS, Android, SMS, and email — at 10 million notifications per day with delivery tracking and per-user opt-out settings.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch10) 20%,transparent);color:var(--ch10)">2</div>
+            <div class="iv-step-title">High-Level Design</div>
+            <div class="iv-step-time">~10 min</div>
+          </div>
+          <div class="speech">Multiple upstream services call our Notification Service. It validates input, checks user settings and opt-outs, persists the notification, then fans out to four separate message queues — one per channel. Separate worker pools pull from each queue and call the appropriate 3rd-party provider.</div>
+        </div>
+        <div class="iv-step">
+          <div class="iv-step-head">
+            <div class="iv-step-num" style="background:color-mix(in srgb,var(--ch10) 20%,transparent);color:var(--ch10)">3</div>
+            <div class="iv-step-title">Deep Dive — Reliability</div>
+            <div class="iv-step-time">~12 min</div>
+          </div>
+          <div class="speech">For reliability: we persist every notification before queuing so we can replay on crash. Workers use idempotency keys to avoid duplicate sends on retry. 3rd-party failures get retried with exponential backoff. Permanent failures go to a dead letter queue for investigation. Exactly-once delivery isn't guaranteed end-to-end — APNs itself may deliver twice — so client apps must be idempotent.</div>
+        </div>
+      </div>
+      <div class="sec">
+        <div class="sec-title">Common Follow-up Questions</div>
+        <div class="faq">
+          <div class="faq-q">How do you handle a 3rd-party provider (e.g. FCM) going down for 2 hours?</div>
+          <div class="faq-a">Messages accumulate in the Android queue. When FCM recovers, workers process the backlog. Important: use a dead letter queue with max-retry limit (e.g. 5 attempts over 30 min) to avoid infinite retries. Alert ops on DLQ depth. Consider SMS fallback for high-priority notifications.</div>
+          <div class="faq-q">How do you send 1 billion notifications efficiently?</div>
+          <div class="faq-a">Fan-out at the worker level: one "broadcast" event triggers a job that writes millions of individual notification records in bulk, then batches them into queue messages. Use batch APIs where supported (FCM supports up to 500 tokens per batch request). Scale workers horizontally.</div>
+          <div class="faq-q">How do you handle device token refresh (APNs/FCM rotate tokens)?</div>
+          <div class="faq-a">When a send fails with "invalid token" error from APNs/FCM, delete or mark the token as invalid in DB. The app will register a new token on next launch. For FCM, token rotation is automatic — listen to the token refresh callback in the SDK and update your backend.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</main>
+<script>
+function switchTab(btn, chId, tabId) {
+  const ch = document.getElementById(chId);
+  ch.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  ch.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(chId + '-' + tabId).classList.add('active');
+}
+const obs = new IntersectionObserver(e => e.forEach(x => { if(x.isIntersecting){x.target.classList.add('show');obs.unobserve(x.target);}}),{threshold:.05});
+document.querySelectorAll('.ch').forEach(c => obs.observe(c));
+</script>
+</body>
+</html>

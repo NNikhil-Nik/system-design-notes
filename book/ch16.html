@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 16: The Learning Continues</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="16">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 16</div><h1>The Learning Continues</h1>
+    <p class="lead">The book ends by pointing outward. Real companies have published how their systems work, and reading those write-ups is the best way to keep learning. This page lists the architectures and engineering blogs the book recommends, then adds a beginner's roadmap: how all the chapters connect, a 30-day practice plan, and new problems to try.</p>
+    <div class="meta"><span class="tag">~20 min read</span><span class="tag">Beginner</span><span class="tag">Prerequisites: Chapters 1–15</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>Designing good systems takes years of experience. The book's closing advice is simple: the fastest way to build that experience without living through every outage yourself is to <strong>study real-world system architectures</strong>. Companies like Facebook, Netflix and Twitter have written about the problems they hit and how they solved them.</p>
+    <p>You will notice that the same ideas from this book keep coming back: caches, sharding, replication, queues, unique IDs. Seeing them in real systems makes them stick, and it gives you concrete stories to mention in interviews.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Learning system design from one book is like learning to cook from one cookbook. You learn the core techniques: how to chop, braise, make a sauce. To get really good, you eat at other restaurants, read chefs' notes and see how professionals handle a busy Saturday night. Engineering blogs are those chefs' notes. Each one shows a familiar technique used under real pressure.</p>
+    </div>
+    <div class="callout tip"><div class="callout-title">How to read an architecture write-up</div>
+      <p>The book suggests that while reading, you pay attention to the <strong>shared principles and underlying technologies</strong>. For each article ask: What problem were they facing? Which building blocks from this book did they use? What trade-off did they make? A short answer to each is enough.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Architecture write-up</dt><dd>An article or paper in which a company explains how a system is built and why.</dd>
+      <dt>Engineering blog</dt><dd>A company's public blog where its engineers share lessons, designs and post-mortems.</dd>
+      <dt>Paper</dt><dd>A formal technical document, often presented at a conference. Google's Bigtable and Amazon's Dynamo are famous examples.</dd>
+      <dt>Denormalization</dt><dd>Storing copies of data in several places so reads are faster, at the cost of more storage and harder updates.</dd>
+      <dt>Social graph</dt><dd>The network of who is connected to whom (friends, followers).</dd>
+      <dt>Building block</dt><dd>A reusable component like a load balancer, cache or message queue that appears in many systems.</dd>
+      <dt>Post-mortem</dt><dd>A write-up after an outage explaining what went wrong and what was changed to prevent it.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="real-world-systems">Real-world systems worth studying</h2>
+    <p>The book lists published architectures from well-known companies. They are grouped below by company with a one-line note on <em>why</em> each one is useful to a beginner. Search for the titles; the book's reference links are not reproduced here.</p>
+    <div class="cards">
+      <div class="card sky"><h4>Facebook</h4><ul>
+        <li><em>Facebook Timeline: Brought To You By The Power Of Denormalization</em>: denormalizing data for fast reads.</li>
+        <li><em>Scale at Facebook</em> and <em>Building Timeline: Scaling up to hold your life story</em>: growing a feature to huge scale.</li>
+        <li><em>Erlang at Facebook</em> and <em>Facebook Chat</em>: building chat (compare with Chapter 12).</li>
+        <li><em>Finding a needle in Haystack: Facebook's photo storage</em>: storing a vast number of photos.</li>
+        <li><em>Serving Facebook Multifeed</em>: redesigning the news feed backend (compare with Chapter 11).</li>
+        <li><em>Scaling Memcache at Facebook</em>: caching at enormous scale (Chapter 1's cache tier, grown up).</li>
+        <li><em>TAO: Facebook's Distributed Data Store for the Social Graph</em>: storing friend relationships.</li>
+      </ul></div>
+      <div class="card yellow"><h4>Amazon</h4><ul>
+        <li><em>Amazon Architecture</em>: a service-oriented overview.</li>
+        <li><em>Dynamo: Amazon's Highly Available Key-value Store</em>: the paper behind much of Chapter 6.</li>
+      </ul></div>
+      <div class="card red"><h4>Netflix</h4><ul>
+        <li><em>A 360 Degree View Of The Entire Netflix Stack</em>: the whole video platform (compare with Chapter 14).</li>
+        <li><em>It's All A/Bout Testing: The Netflix Experimentation Platform</em>: running experiments safely.</li>
+        <li><em>Netflix Recommendations: Beyond the 5 stars</em> (Parts 1 and 2): recommendation systems.</li>
+      </ul></div>
+      <div class="card green"><h4>Google</h4><ul>
+        <li><em>Google Architecture</em>: an overview.</li>
+        <li><em>The Google File System</em>: distributed file storage.</li>
+        <li><em>Differential Synchronization</em>: how Google Docs keeps edits in sync (related to Chapter 15).</li>
+        <li><em>Bigtable: A Distributed Storage System for Structured Data</em>: a classic wide-column store.</li>
+      </ul></div>
+      <div class="card pink"><h4>YouTube</h4><ul>
+        <li><em>YouTube Architecture</em> and <em>Seattle Conference on Scalability: YouTube Scalability</em>: scaling video serving (Chapter 14).</li>
+      </ul></div>
+      <div class="card purple"><h4>Twitter</h4><ul>
+        <li><em>The Architecture Twitter Uses To Deal With 150M Active Users</em>: an architecture overview.</li>
+        <li><em>Scaling Twitter: Making Twitter 10000 Percent Faster</em>: performance work.</li>
+        <li><em>Announcing Snowflake</em>: Twitter's unique ID generator (Chapter 7).</li>
+        <li><em>Timelines at Scale</em>: building home timelines (Chapter 11).</li>
+      </ul></div>
+      <div class="card teal"><h4>Others</h4><ul>
+        <li><em>Instagram Architecture</em>: photos and scaling a small team.</li>
+        <li><em>How Uber scales their real-time market platform</em>: real-time matching.</li>
+        <li><em>Scaling Pinterest</em> and <em>Pinterest Architecture Update</em>: sharding a fast-growing site.</li>
+        <li><em>A Brief History of Scaling LinkedIn</em>: evolving from one database to many services.</li>
+        <li><em>Flickr Architecture</em>: photo hosting.</li>
+        <li><em>How We've Scaled Dropbox</em>: file sync and storage (Chapter 15).</li>
+        <li><em>The WhatsApp Architecture</em>: messaging with a very small team (Chapter 12).</li>
+      </ul></div>
+    </div>
+    <div class="callout info"><div class="callout-title">Where to start</div>
+      <p>If you only read three, pick ones that match chapters you found hard. For example: <em>Dynamo</em> with Chapter 6, <em>Announcing Snowflake</em> with Chapter 7, and <em>Timelines at Scale</em> with Chapter 11. Reading the real source right after the chapter makes both easier to understand.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="engineering-blogs">Company engineering blogs</h2>
+    <p>The book also recommends following the engineering blogs of companies you are interviewing with. Their blogs show which technologies and problems they care about, which helps you prepare and ask good questions. The book's list:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><td>Airbnb</td><td>Amazon</td><td>Asana</td><td>Atlassian</td><td>Bittorrent</td></tr>
+      <tr><td>Cloudera</td><td>Docker</td><td>Dropbox</td><td>eBay</td><td>Facebook</td></tr>
+      <tr><td>GitHub</td><td>Google</td><td>Groupon</td><td>Highscalability</td><td>Instacart</td></tr>
+      <tr><td>Instagram</td><td>Linkedin</td><td>Mixpanel</td><td>Netflix</td><td>Nextdoor</td></tr>
+      <tr><td>PayPal</td><td>Pinterest</td><td>Quora</td><td>Reddit</td><td>Salesforce</td></tr>
+      <tr><td>Shopify</td><td>Slack</td><td>Soundcloud</td><td>Spotify</td><td>Stripe</td></tr>
+      <tr><td>System design primer</td><td>Twitter</td><td>Thumbtack</td><td>Uber</td><td>Yahoo</td></tr>
+      <tr><td>Yelp</td><td>Zoom</td><td></td><td></td><td></td></tr>
+    </table></div>
+    <div class="callout tip"><div class="callout-title">Make it a habit</div>
+      <p>Pick two or three blogs and read one post a week. Keep a small notes file with three lines per post: <strong>problem, building blocks used, trade-off made</strong>. After a few months you will have a personal library of real examples to mention in interviews.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="chapter-recap">Recap: every chapter's core building block</h2>
+    <p>This table pulls the whole book together. The left columns name each chapter's main technique. The right column shows where it shows up again, so you can see the book as one connected toolkit.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Ch</th><th>Topic</th><th>Key technique</th><th>Where else it shows up</th></tr>
+      <tr><td>1</td><td>Scale from zero to millions of users</td><td>Load balancer, stateless web tier, cache, CDN, DB replication, sharding, message queue, multiple data centers</td><td>Nearly every later chapter. This is the master toolkit.</td></tr>
+      <tr><td>2</td><td>Back-of-the-envelope estimation</td><td>Powers of two, latency numbers, QPS and storage estimates</td><td>Step 2 of every design (Ch 8–15)</td></tr>
+      <tr><td>3</td><td>Interview framework</td><td>The 4 steps: scope, high level, deep dive, wrap up</td><td>The structure of Chapters 4–15</td></tr>
+      <tr><td>4</td><td>Rate limiter</td><td>Token bucket, leaking bucket, fixed and sliding window algorithms</td><td>Notification system (Ch 10), news feed posting (Ch 11), API gateways</td></tr>
+      <tr><td>5</td><td>Consistent hashing</td><td>Hash ring with virtual nodes, minimal key movement</td><td>Key-value store partitioning (Ch 6), web crawler downloaders (Ch 9)</td></tr>
+      <tr><td>6</td><td>Key-value store</td><td>CAP trade-offs, replication, quorum (N, W, R), vector clocks, gossip, Merkle trees</td><td>Chat history storage (Ch 12), autocomplete trie storage (Ch 13)</td></tr>
+      <tr><td>7</td><td>Unique ID generator</td><td>Twitter Snowflake-style 64-bit IDs (timestamp + machine + sequence)</td><td>URL shortener (Ch 8), chat message IDs (Ch 12)</td></tr>
+      <tr><td>8</td><td>URL shortener</td><td>Base-62 conversion vs hash + collision handling, 301 vs 302 redirects</td><td>Any system that needs short codes or IDs</td></tr>
+      <tr><td>9</td><td>Web crawler</td><td>BFS with a URL frontier (politeness and priority queues), deduplication</td><td>Search engines, data pipelines</td></tr>
+      <tr><td>10</td><td>Notification system</td><td>Message queues per channel, workers, retries, templates, settings</td><td>News feed notifications (Ch 11), Drive sync notices (Ch 15)</td></tr>
+      <tr><td>11</td><td>News feed</td><td>Fanout on write vs fanout on read, hybrid for celebrities, feed cache</td><td>Timelines in any social product</td></tr>
+      <tr><td>12</td><td>Chat system</td><td>WebSocket connections, stateful chat servers, presence via heartbeats</td><td>Any real-time feature (live comments, collaboration)</td></tr>
+      <tr><td>13</td><td>Search autocomplete</td><td>Trie with cached top-k results per node, data gathering pipeline</td><td>Search boxes everywhere</td></tr>
+      <tr><td>14</td><td>YouTube</td><td>Upload to blob storage, transcoding DAG, CDN streaming, cost optimisation</td><td>Any media platform</td></tr>
+      <tr><td>15</td><td>Google Drive</td><td>Block-level sync with delta upload and deduplication, long polling, strong consistency for metadata</td><td>File sync and backup products</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <h2 id="concept-map">Concept dependency map</h2>
+    <p>Chapters 1–7 teach the building blocks. Chapters 8–15 assemble them into real systems. The first diagram shows that relationship. The second shows <em>which</em> blocks each system design leans on.</p>
+    <div class="diagram"><div class="diagram-title">From foundations to full systems</div>
+      <div class="arch">
+        <div class="arch-row"><div class="group"><span class="group-label">Method (Ch 2–3)</span><div class="node yellow">Estimation</div><div class="node yellow">4-step framework</div></div></div>
+        <div class="arch-down">↓<small>applied to</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">Building blocks (Ch 1, 4–7)</span><div class="node accent">Load balancer</div><div class="node teal">Cache</div><div class="node sky">CDN</div><div class="node red">Message queue</div><div class="node green">Sharding</div><div class="node green">Replication</div><div class="node purple">Consistent hashing</div><div class="node pink">Rate limiter</div><div class="node yellow">Unique IDs</div><div class="node db purple">KV store</div></div></div>
+        <div class="arch-down">↓<small>combined into</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">System designs (Ch 8–15)</span><div class="node">URL shortener</div><div class="node">Web crawler</div><div class="node">Notifications</div><div class="node">News feed</div><div class="node">Chat</div><div class="node">Autocomplete</div><div class="node">YouTube</div><div class="node">Google Drive</div></div></div>
+      </div>
+      <div class="diagram-caption">Learn the method and the blocks once, and every system design becomes a new combination of familiar parts.</div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Which building blocks each design uses</div>
+      <svg class="dg" viewBox="0 0 800 420" role="img" aria-label="Matrix of building blocks versus system design chapters">
+        <text x="228" y="34" text-anchor="middle">Ch 8</text>
+        <text x="228" y="52" text-anchor="middle" class="sm">URL</text>
+        <text x="304" y="34" text-anchor="middle">Ch 9</text>
+        <text x="304" y="52" text-anchor="middle" class="sm">Crawler</text>
+        <text x="380" y="34" text-anchor="middle">Ch 10</text>
+        <text x="380" y="52" text-anchor="middle" class="sm">Notify</text>
+        <text x="456" y="34" text-anchor="middle">Ch 11</text>
+        <text x="456" y="52" text-anchor="middle" class="sm">Feed</text>
+        <text x="532" y="34" text-anchor="middle">Ch 12</text>
+        <text x="532" y="52" text-anchor="middle" class="sm">Chat</text>
+        <text x="608" y="34" text-anchor="middle">Ch 13</text>
+        <text x="608" y="52" text-anchor="middle" class="sm">Autocomp.</text>
+        <text x="684" y="34" text-anchor="middle">Ch 14</text>
+        <text x="684" y="52" text-anchor="middle" class="sm">YouTube</text>
+        <text x="760" y="34" text-anchor="middle">Ch 15</text>
+        <text x="760" y="52" text-anchor="middle" class="sm">Drive</text>
+        <line x1="20" y1="106" x2="790" y2="106" stroke-dasharray="2 4"/>
+        <text x="24" y="95">Load balancer</text>
+        <circle cx="228" cy="90" r="7" class="fill-a"/>
+        <circle cx="304" cy="90" r="2" class="sm"/>
+        <circle cx="380" cy="90" r="7" class="fill-a"/>
+        <circle cx="456" cy="90" r="7" class="fill-a"/>
+        <circle cx="532" cy="90" r="7" class="fill-a"/>
+        <circle cx="608" cy="90" r="7" class="fill-a"/>
+        <circle cx="684" cy="90" r="7" class="fill-a"/>
+        <circle cx="760" cy="90" r="7" class="fill-a"/>
+        <line x1="20" y1="138" x2="790" y2="138" stroke-dasharray="2 4"/>
+        <text x="24" y="127">Cache</text>
+        <circle cx="228" cy="122" r="7" class="fill-a"/>
+        <circle cx="304" cy="122" r="7" class="fill-a"/>
+        <circle cx="380" cy="122" r="7" class="fill-a"/>
+        <circle cx="456" cy="122" r="7" class="fill-a"/>
+        <circle cx="532" cy="122" r="2" class="sm"/>
+        <circle cx="608" cy="122" r="7" class="fill-a"/>
+        <circle cx="684" cy="122" r="7" class="fill-a"/>
+        <circle cx="760" cy="122" r="7" class="fill-a"/>
+        <line x1="20" y1="170" x2="790" y2="170" stroke-dasharray="2 4"/>
+        <text x="24" y="159">CDN</text>
+        <circle cx="228" cy="154" r="2" class="sm"/>
+        <circle cx="304" cy="154" r="2" class="sm"/>
+        <circle cx="380" cy="154" r="2" class="sm"/>
+        <circle cx="456" cy="154" r="7" class="fill-a"/>
+        <circle cx="532" cy="154" r="2" class="sm"/>
+        <circle cx="608" cy="154" r="2" class="sm"/>
+        <circle cx="684" cy="154" r="7" class="fill-a"/>
+        <circle cx="760" cy="154" r="2" class="sm"/>
+        <line x1="20" y1="202" x2="790" y2="202" stroke-dasharray="2 4"/>
+        <text x="24" y="191">Message queue</text>
+        <circle cx="228" cy="186" r="2" class="sm"/>
+        <circle cx="304" cy="186" r="7" class="fill-a"/>
+        <circle cx="380" cy="186" r="7" class="fill-a"/>
+        <circle cx="456" cy="186" r="7" class="fill-a"/>
+        <circle cx="532" cy="186" r="7" class="fill-a"/>
+        <circle cx="608" cy="186" r="2" class="sm"/>
+        <circle cx="684" cy="186" r="7" class="fill-a"/>
+        <circle cx="760" cy="186" r="7" class="fill-a"/>
+        <line x1="20" y1="234" x2="790" y2="234" stroke-dasharray="2 4"/>
+        <text x="24" y="223">Sharding</text>
+        <circle cx="228" cy="218" r="2" class="sm"/>
+        <circle cx="304" cy="218" r="2" class="sm"/>
+        <circle cx="380" cy="218" r="2" class="sm"/>
+        <circle cx="456" cy="218" r="7" class="fill-a"/>
+        <circle cx="532" cy="218" r="7" class="fill-a"/>
+        <circle cx="608" cy="218" r="7" class="fill-a"/>
+        <circle cx="684" cy="218" r="7" class="fill-a"/>
+        <circle cx="760" cy="218" r="7" class="fill-a"/>
+        <line x1="20" y1="266" x2="790" y2="266" stroke-dasharray="2 4"/>
+        <text x="24" y="255">Replication</text>
+        <circle cx="228" cy="250" r="2" class="sm"/>
+        <circle cx="304" cy="250" r="2" class="sm"/>
+        <circle cx="380" cy="250" r="2" class="sm"/>
+        <circle cx="456" cy="250" r="7" class="fill-a"/>
+        <circle cx="532" cy="250" r="7" class="fill-a"/>
+        <circle cx="608" cy="250" r="2" class="sm"/>
+        <circle cx="684" cy="250" r="7" class="fill-a"/>
+        <circle cx="760" cy="250" r="7" class="fill-a"/>
+        <line x1="20" y1="298" x2="790" y2="298" stroke-dasharray="2 4"/>
+        <text x="24" y="287">Consistent hashing</text>
+        <circle cx="228" cy="282" r="2" class="sm"/>
+        <circle cx="304" cy="282" r="7" class="fill-a"/>
+        <circle cx="380" cy="282" r="2" class="sm"/>
+        <circle cx="456" cy="282" r="2" class="sm"/>
+        <circle cx="532" cy="282" r="7" class="fill-a"/>
+        <circle cx="608" cy="282" r="2" class="sm"/>
+        <circle cx="684" cy="282" r="2" class="sm"/>
+        <circle cx="760" cy="282" r="2" class="sm"/>
+        <line x1="20" y1="330" x2="790" y2="330" stroke-dasharray="2 4"/>
+        <text x="24" y="319">Rate limiter</text>
+        <circle cx="228" cy="314" r="2" class="sm"/>
+        <circle cx="304" cy="314" r="2" class="sm"/>
+        <circle cx="380" cy="314" r="7" class="fill-a"/>
+        <circle cx="456" cy="314" r="7" class="fill-a"/>
+        <circle cx="532" cy="314" r="2" class="sm"/>
+        <circle cx="608" cy="314" r="2" class="sm"/>
+        <circle cx="684" cy="314" r="2" class="sm"/>
+        <circle cx="760" cy="314" r="2" class="sm"/>
+        <line x1="20" y1="362" x2="790" y2="362" stroke-dasharray="2 4"/>
+        <text x="24" y="351">Unique IDs</text>
+        <circle cx="228" cy="346" r="7" class="fill-a"/>
+        <circle cx="304" cy="346" r="2" class="sm"/>
+        <circle cx="380" cy="346" r="2" class="sm"/>
+        <circle cx="456" cy="346" r="2" class="sm"/>
+        <circle cx="532" cy="346" r="7" class="fill-a"/>
+        <circle cx="608" cy="346" r="2" class="sm"/>
+        <circle cx="684" cy="346" r="2" class="sm"/>
+        <circle cx="760" cy="346" r="2" class="sm"/>
+        <line x1="20" y1="394" x2="790" y2="394" stroke-dasharray="2 4"/>
+        <text x="24" y="383">KV store</text>
+        <circle cx="228" cy="378" r="2" class="sm"/>
+        <circle cx="304" cy="378" r="2" class="sm"/>
+        <circle cx="380" cy="378" r="2" class="sm"/>
+        <circle cx="456" cy="378" r="2" class="sm"/>
+        <circle cx="532" cy="378" r="7" class="fill-a"/>
+        <circle cx="608" cy="378" r="7" class="fill-a"/>
+        <circle cx="684" cy="378" r="2" class="sm"/>
+        <circle cx="760" cy="378" r="2" class="sm"/>
+      </svg>
+      <div class="diagram-caption">A dot means the block plays a visible role in that chapter's design. This is simplified: most real systems use almost every block somewhere. Notice that caches, load balancers and message queues are nearly everywhere, which is why Chapter 1 matters so much.</div>
+    </div>
+    <div class="callout key"><div class="callout-title">Key idea</div>
+      <p>Two blocks give the most value for your study time: <strong>caching</strong> and <strong>message queues</strong>. If you understand when to cache (read-heavy data) and when to queue (slow work that need not block the user), you can explain a large part of any design.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="practice-plan">A 30-day practice plan</h2>
+    <p>Reading is not enough. You need to practise designing <em>out loud</em> under a time limit. Here is a plan for about an hour a day. Adjust it to your schedule.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Days</th><th>Focus</th><th>What to do</th></tr>
+      <tr><td>1–3</td><td>Foundations</td><td>Re-read Chapter 1. Draw the final "millions of users" diagram from memory until you can do it in 5 minutes and explain every box.</td></tr>
+      <tr><td>4–5</td><td>Estimation</td><td>Re-read Chapter 2. Do three estimates a day (QPS, storage, bandwidth) for apps you use. Check your powers of two.</td></tr>
+      <tr><td>6–7</td><td>Framework</td><td>Re-read Chapter 3. Write your own question bank. Time yourself doing Step 1 only for five different problems.</td></tr>
+      <tr><td>8–12</td><td>Building blocks</td><td>One per day: rate limiter, consistent hashing, KV store (two days), unique IDs. Explain each to an imaginary beginner in 3 minutes.</td></tr>
+      <tr><td>13–20</td><td>System designs</td><td>One per day, Chapters 8–15. First try the design yourself in 45 minutes with a timer. Then read the chapter and note what you missed.</td></tr>
+      <tr><td>21–22</td><td>Real systems</td><td>Read two architecture write-ups from the list above. For each, write down problem, blocks used and trade-off.</td></tr>
+      <tr><td>23–27</td><td>New problems</td><td>One new problem per day from the practice list below, fully timed, out loud. Record yourself if you can.</td></tr>
+      <tr><td>28–29</td><td>Mock interviews</td><td>Do at least one mock with a friend or peer playing the interviewer. Ask them to push back and interrupt.</td></tr>
+      <tr><td>30</td><td>Review</td><td>Go through every chapter's cheat sheet. List your three weakest topics and plan the next month around them.</td></tr>
+    </table></div>
+    <div class="callout tip"><div class="callout-title">Practise the wrap-up too</div>
+      <p>Most people practise only the diagram. In every practice session, spend the last 3–5 minutes naming bottlenecks, failure cases and the next scale step. It is the part beginners most often skip.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="practice-problems">Classic practice problems not in this volume</h2>
+    <p>These are popular interview problems that this book does not cover. Try each with the 4-step framework. The hints point you to the right building blocks without giving the full answer.</p>
+    <div class="cards">
+      <div class="card sky"><h4>Proximity service (find nearby restaurants)</h4><ul>
+        <li>Searching "everything within 1 km" on raw latitude and longitude is slow. Look up <strong>geohash</strong> or <strong>quadtree</strong> to group nearby places.</li>
+        <li>Business data changes rarely but is read constantly. Think read replicas and caching.</li>
+        <li>Separate the "search nearby" service from the "business details" service.</li>
+      </ul></div>
+      <div class="card yellow"><h4>Ticketing system (concert tickets)</h4><ul>
+        <li>The hard part is preventing two people from buying the same seat. Think about locking or atomic updates on seat rows.</li>
+        <li>Popular events cause sudden spikes. Consider a virtual waiting room (a queue) and rate limiting.</li>
+        <li>Hold a seat for a few minutes during checkout, then release it if payment does not finish.</li>
+      </ul></div>
+      <div class="card green"><h4>Payment system</h4><ul>
+        <li>Correctness beats speed. Use <strong>idempotency keys</strong> so retrying a request never charges twice.</li>
+        <li>Record every money movement in a ledger and reconcile with external payment providers.</li>
+        <li>Plan for failures from the external provider: retries with backoff, and a way to track payments stuck in a pending state.</li>
+      </ul></div>
+      <div class="card red"><h4>Distributed message queue</h4><ul>
+        <li>Store messages in an append-only log split into <strong>partitions</strong> so many brokers share the load.</li>
+        <li>Replicate each partition to survive broker failures (Chapter 6 ideas apply).</li>
+        <li>Discuss delivery guarantees: at-most-once, at-least-once, exactly-once, and their trade-offs.</li>
+      </ul></div>
+      <div class="card purple"><h4>Metrics monitoring and alerting</h4><ul>
+        <li>Metrics are time-stamped numbers, so a <strong>time-series database</strong> fits well.</li>
+        <li>Huge write volume: put a message queue between collectors and storage.</li>
+        <li>Keep recent data at full detail and roll old data up into coarser summaries to save space.</li>
+      </ul></div>
+      <div class="card teal"><h4>Hotel reservation system</h4><ul>
+        <li>Like ticketing, avoid double booking. Track available room counts per room type per date.</li>
+        <li>Use idempotency so a double-clicked "Book" button creates only one reservation.</li>
+        <li>Booking data needs strong consistency, so a relational database with transactions is a natural fit.</li>
+      </ul></div>
+      <div class="card pink"><h4>Stock exchange</h4><ul>
+        <li>The core is a <strong>matching engine</strong> that pairs buy and sell orders in an order book. Latency is critical.</li>
+        <li>Orders must be processed in a strict, deterministic sequence so results can be replayed and audited.</li>
+        <li>Separate the fast trading path from slower paths like reporting and market data distribution.</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <ol class="steps">
+      <li><strong>Master the method.</strong> The 4-step framework (Chapter 3) and quick estimation (Chapter 2) work for any problem.</li>
+      <li><strong>Know the blocks.</strong> Load balancer, cache, CDN, queue, sharding, replication, consistent hashing, rate limiter, unique IDs, KV store.</li>
+      <li><strong>Study the combinations.</strong> Chapters 8–15 show how the blocks are assembled for real products.</li>
+      <li><strong>Learn from real companies.</strong> Read architecture write-ups and engineering blogs, especially for companies you are interviewing with.</li>
+      <li><strong>Practise out loud, timed.</strong> Use the 30-day plan and the new problems to build fluency.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="how-to-answer-in-an-interview">How to answer this in an interview</h2>
+    <p>Reading real architectures pays off when interviewers ask about your knowledge or push you on a design choice.</p>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Using real-world examples</div><div class="iv-time">anytime</div></div>
+      <ul>
+        <li>Mention a real system briefly to support a choice. Do not lecture.</li>
+        <li>Connect it straight back to your design.</li>
+      </ul>
+      <div class="say">For unique post IDs across many servers, I'd use a Snowflake-style approach, like the one Twitter published: a timestamp, a machine ID and a sequence number packed into 64 bits. That gives us IDs that are roughly sortable by time without a central bottleneck.</div>
+      <div class="say them">Why not just use the database's auto-increment?</div>
+      <div class="say">With one database that works. Once we shard across many databases, auto-increment can't guarantee global uniqueness or time ordering without extra coordination. Snowflake IDs avoid that.</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">"How do you keep learning?"</div><div class="iv-time">behavioural</div></div>
+      <div class="say them">How do you stay current on system design?</div>
+      <div class="say">I read engineering blogs regularly, including yours. For each post I note the problem, the building blocks they used and the trade-off they chose. For example, reading about how a key-value store like Dynamo uses quorum reads and writes helped me understand the consistency and availability trade-off much better than theory alone.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Memorising designs instead of understanding them</div>
+      <p>Interviewers change requirements on purpose. If you only memorised the YouTube chapter's diagram, you will struggle when they say "now it's live streaming." Understand <em>why</em> each block is there.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Name-dropping without substance</div>
+      <p>Saying "Facebook uses TAO" without explaining what problem it solves impresses nobody. If you mention a real system, give one sentence on the problem and the trade-off.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Only reading, never practising</div>
+      <p>Reading feels productive but the interview is a speaking exercise under time pressure. Timed practice out loud is what builds the skill.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself: whole-book review</h2>
+    <div class="quiz">
+      <details><summary>1. (Ch 1) Why should the web tier be stateless?</summary><div><p>If servers keep no user session data locally (it lives in a shared store instead), any server can handle any request. That makes horizontal scaling and auto-scaling easy, and the load balancer can send traffic anywhere.</p></div></details>
+      <details><summary>2. (Ch 2) Roughly how many seconds are in a day, and why does it matter?</summary><div><p>About 86,400 (often rounded to ~100,000 for quick maths). Dividing daily request counts by it turns "requests per day" into QPS, the number you size servers with.</p></div></details>
+      <details><summary>3. (Ch 3) What are the four steps of the framework?</summary><div><p>Understand the problem and establish design scope; propose a high-level design and get buy-in; design deep dive; wrap up.</p></div></details>
+      <details><summary>4. (Ch 4) Why does the token bucket algorithm allow short bursts?</summary><div><p>Tokens build up to the bucket's capacity while traffic is quiet. A burst can spend all saved tokens at once, and after that requests are limited to the refill rate.</p></div></details>
+      <details><summary>5. (Ch 5) What problem do virtual nodes solve in consistent hashing?</summary><div><p>With few servers on the ring, partitions can be very uneven. Giving each server many virtual positions spreads keys more evenly and balances load.</p></div></details>
+      <details><summary>6. (Ch 6) In a quorum system with N=3, what do W=1 and R=1 optimise for, and what do you lose?</summary><div><p>Fast writes and fast reads, because only one replica has to respond. You lose strong consistency, since a read may hit a replica that has not received the latest write. W + R &gt; N is needed for strong consistency.</p></div></details>
+      <details><summary>7. (Ch 7) What are the parts of a Snowflake ID?</summary><div><p>A sign bit, a timestamp (milliseconds since a custom epoch), a datacenter ID, a machine ID and a sequence number. The timestamp at the front makes IDs roughly sortable by time.</p></div></details>
+      <details><summary>8. (Ch 8) 301 or 302 redirect for a URL shortener, and why?</summary><div><p>A 301 (permanent) lets browsers cache the redirect, which reduces server load. A 302 (temporary) sends every click to your servers, which is better if you need click analytics. Pick based on the goal.</p></div></details>
+      <details><summary>9. (Ch 11) Why use a hybrid fanout approach for a news feed?</summary><div><p>Fanout on write makes reads fast but is very costly for celebrities with huge followings. The hybrid pushes posts for most users and lets followers pull celebrity posts at read time.</p></div></details>
+      <details><summary>10. (Ch 12 and 15) Why does chat use WebSocket while Google Drive's notifications use long polling?</summary><div><p>Chat needs fast, frequent, two-way messages, which WebSocket's persistent bidirectional connection provides. Drive's notifications are infrequent and only flow from server to client, so the book picks long polling as the simpler fit.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Keep learning by studying real-world architectures. Focus on shared principles and underlying technologies.</li>
+      <li>Must-reads that match chapters: Dynamo (Ch 6), Snowflake (Ch 7), Timelines at Scale and Multifeed (Ch 11), Facebook Chat and WhatsApp (Ch 12), YouTube scalability (Ch 14), Dropbox (Ch 15).</li>
+      <li>Follow the engineering blogs of companies you are interviewing with.</li>
+      <li>For each article note three things: problem, building blocks, trade-off.</li>
+      <li>Chapters 1–7 are building blocks. Chapters 8–15 are combinations of them.</li>
+      <li>Cache and message queue appear in almost every design. Master them first.</li>
+      <li>Practise timed and out loud, including the wrap-up.</li>
+      <li>Next problems: proximity service, ticketing, payment, distributed message queue, metrics monitoring, hotel reservation, stock exchange.</li>
+      <li>Understand why each component exists. Don't memorise diagrams.</li>
+      <li>The book's final message: designing systems takes years of learning. Keep going.</li>
+    </ul></div>
+  </section>
+
+</main>
+<script src="assets/app.js"></script></body></html>

@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 9 - Design a Web Crawler</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="9">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 9</div><h1>Design a Web Crawler</h1>
+    <p class="lead">A web crawler (also called a robot or spider) is a program that visits web pages, saves them, finds the links on them, and then visits those links too. Search engines like Google use crawlers to discover the web. Designing one at the scale of a billion pages a month teaches you queues, politeness, deduplication and how to survive a messy, hostile internet.</p>
+    <div class="meta"><span class="tag">~35 min read</span><span class="tag">Beginner</span><span class="tag">Prerequisites: Ch 1 (scaling), Ch 2 (estimation), Ch 5 (consistent hashing)</span></div></header>
+
+  <section><h2 id="the-big-picture">The big picture</h2>
+    <p>A crawler starts with a few web pages, downloads them, collects the links they contain, and then downloads the pages those links point to. Repeat this forever and you slowly discover a huge part of the web. Crawlers are used for many purposes:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Search engine indexing</h4><p>The most common use. A crawler collects pages to build a local index for a search engine. Googlebot is the crawler behind Google Search.</p></div>
+      <div class="card green"><h4>Web archiving</h4><p>Collecting pages to preserve them for future use. National libraries run crawlers to archive websites; the US Library of Congress and the EU web archive are examples.</p></div>
+      <div class="card yellow"><h4>Web mining</h4><p>Discovering useful knowledge from the web. For example, financial firms crawl shareholder meetings and annual reports to learn key company initiatives.</p></div>
+      <div class="card pink"><h4>Web monitoring</h4><p>Watching the web for copyright and trademark infringements. For example, Digimarc uses crawlers to discover pirated works and reports.</p></div>
+    </div>
+    <h3>The basic algorithm</h3>
+    <ol class="steps">
+      <li><strong>Start</strong> with a set of URLs (the seed URLs) and download all the web pages they address.</li>
+      <li><strong>Extract</strong> URLs from these web pages.</li>
+      <li><strong>Add</strong> the new URLs to the list of URLs to be downloaded. Repeat these 3 steps.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">The crawl loop</div>
+      <svg class="dg" viewBox="0 0 640 230">
+        <defs><marker id="c9m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="30" y="20" width="150" height="50" rx="8" class="a"/><text x="105" y="50" text-anchor="middle">Seed URLs</text>
+        <rect x="245" y="20" width="150" height="50" rx="8" class="s"/><text x="320" y="50" text-anchor="middle">Download page</text>
+        <rect x="460" y="20" width="150" height="50" rx="8" class="g"/><text x="535" y="50" text-anchor="middle">Extract links</text>
+        <rect x="245" y="160" width="150" height="50" rx="8" class="y"/><text x="320" y="182" text-anchor="middle">Add new URLs</text><text x="320" y="200" text-anchor="middle" class="sm">to the to-do list</text>
+        <line x1="180" y1="45" x2="243" y2="45" marker-end="url(#c9m1)"/>
+        <line x1="395" y1="45" x2="458" y2="45" marker-end="url(#c9m1)"/>
+        <path d="M535,70 L535,185 L397,185" marker-end="url(#c9m1)"/>
+        <path d="M245,185 L200,185 L200,110 L300,110 L300,72" marker-end="url(#c9m1)"/>
+        <text x="150" y="140" class="sm">repeat</text>
+      </svg>
+      <div class="diagram-caption">That is all a crawler is at heart. The difficulty is doing this loop for a billion pages a month without overloading websites, downloading duplicates or getting stuck.</div>
+    </div>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Imagine a librarian told to collect every book in a vast city. She starts with a few bookshops she knows (seed URLs). In each shop she buys the books (downloads pages) and notes every other shop mentioned in them (extracts links). She adds those shops to her to-do list (the URL frontier). She must be polite - not barge into the same small shop a hundred times a minute - skip books she already owns (duplicates), obey "no entry" signs (robots.txt), and avoid shops that are an endless hall of mirrors (spider traps). That is a web crawler.</p>
+    </div>
+  </section>
+
+  <section><h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Web crawler / robot / spider</dt><dd>A program that automatically downloads web pages and follows their links.</dd>
+      <dt>Seed URLs</dt><dd>The starting list of URLs the crawler begins with.</dd>
+      <dt>URL frontier</dt><dd>The data structure (essentially a set of queues) holding URLs that are waiting to be downloaded. A to-do list.</dd>
+      <dt>HTML</dt><dd>The text format web pages are written in. It contains content plus links like <code>&lt;a href="..."&gt;</code>.</dd>
+      <dt>HTML downloader</dt><dd>The component that fetches a web page from the internet.</dd>
+      <dt>DNS / DNS resolver</dt><dd>The Domain Name System converts a hostname like <code>www.wikipedia.org</code> into an IP address like <code>198.35.26.96</code>. The resolver is the component that performs that lookup.</dd>
+      <dt>Host / hostname</dt><dd>The website's name part of a URL, such as <code>en.wikipedia.org</code>.</dd>
+      <dt>Parser</dt><dd>Code that reads a downloaded page and checks or extracts its structure.</dd>
+      <dt>Relative vs absolute URL</dt><dd>An absolute URL is complete (<code>https://en.wikipedia.org/wiki/Cong_Weixi</code>). A relative URL (<code>/wiki/Cong_Weixi</code>) only makes sense relative to the page it is on.</dd>
+      <dt>Duplicate content</dt><dd>The same page content appearing at different URLs.</dd>
+      <dt>Hash / checksum</dt><dd>A short fingerprint computed from content. Same content gives the same fingerprint, so comparing fingerprints is fast.</dd>
+      <dt>Bloom filter</dt><dd>A memory-efficient structure that tells you "definitely not seen" or "probably seen". Good for tracking billions of URLs.</dd>
+      <dt>QPS</dt><dd>Queries (here, pages downloaded) per second.</dd>
+      <dt>BFS / DFS</dt><dd>Breadth-first search explores all neighbours before going deeper; depth-first search goes as deep as possible first. The web is a graph of pages (nodes) and links (edges).</dd>
+      <dt>FIFO queue</dt><dd>First-in, first-out: items leave in the same order they arrived, like a line at a ticket office.</dd>
+      <dt>Politeness</dt><dd>Not sending too many requests to the same website in a short time.</dd>
+      <dt>PageRank</dt><dd>A measure of how important a page is based on the links pointing to it.</dd>
+      <dt>Freshness</dt><dd>How up to date the crawler's copy of a page is compared with the live page.</dd>
+      <dt>robots.txt (Robots Exclusion Protocol)</dt><dd>A file websites publish to tell crawlers which pages they may and may not download.</dd>
+      <dt>Spider trap</dt><dd>A web page or site that causes a crawler to loop forever, e.g. URLs that go infinitely deep.</dd>
+      <dt>Consistent hashing</dt><dd>A way to spread work across servers so adding or removing a server moves only a small amount of work (Chapter 5).</dd>
+      <dt>Server-side rendering</dt><dd>Running a page's JavaScript on the crawler to produce the final HTML, since many links only appear after scripts run.</dd>
+    </dl>
+  </section>
+
+  <section><h2 id="step1-requirements">Step 1 - Understand the problem and establish scope</h2>
+    <p>A crawler can be simple (a student project) or enormous (Google). You must ask questions to find out which one you are building. The book's conversation:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th><th>Why it matters</th></tr>
+      <tr><td>What is the main purpose? Search engine indexing, data mining, or something else?</td><td>Search engine indexing.</td><td>Decides what we store and how we prioritise.</td></tr>
+      <tr><td>How many web pages does it collect per month?</td><td>1 billion pages.</td><td>Drives the QPS and storage math.</td></tr>
+      <tr><td>What content types are included? HTML only, or PDFs and images too?</td><td>HTML only.</td><td>Keeps the downloader and parser simple (but we will design for extensibility).</td></tr>
+      <tr><td>Shall we consider newly added or edited web pages?</td><td>Yes.</td><td>We need recrawling (freshness).</td></tr>
+      <tr><td>Do we need to store HTML pages crawled from the web?</td><td>Yes, up to 5 years.</td><td>Sets long-term storage size.</td></tr>
+      <tr><td>How do we handle web pages with duplicate content?</td><td>Pages with duplicate content should be ignored.</td><td>We need a "content seen?" check.</td></tr>
+    </table></div>
+    <h3>Characteristics of a good crawler</h3>
+    <div class="cards">
+      <div class="card sky"><h4>Scalability</h4><p>The web is enormous - billions of pages. Crawling should be extremely efficient using parallelization.</p></div>
+      <div class="card red"><h4>Robustness</h4><p>The web is full of traps: bad HTML, unresponsive servers, crashes, malicious links. The crawler must handle all these edge cases.</p></div>
+      <div class="card green"><h4>Politeness</h4><p>The crawler should not make too many requests to a website within a short time interval.</p></div>
+      <div class="card purple"><h4>Extensibility</h4><p>The system should be flexible so that minimal changes are needed to support new content types (e.g. images).</p></div>
+    </div>
+
+    <h3>Back-of-the-envelope estimation</h3>
+    <p>These numbers are based on the book's assumptions. Let us go step by step.</p>
+    <ol class="steps">
+      <li><strong>Pages per month.</strong> Assume 1 billion web pages are downloaded every month.</li>
+      <li><strong>Pages per second (QPS).</strong> 1,000,000,000 / 30 days / 24 hours / 3600 seconds. That is 1,000,000,000 / 2,592,000 = about 386, which we round to <strong>~400 pages per second</strong>.</li>
+      <li><strong>Peak QPS.</strong> Traffic is not perfectly even, so assume peak = 2 x average = <strong>800 pages per second</strong>.</li>
+      <li><strong>Storage per month.</strong> Assume the average page size is 500 KB. 1 billion x 500 KB = 500 billion KB = <strong>500 TB per month</strong>.</li>
+      <li><strong>Storage for 5 years.</strong> 500 TB x 12 months x 5 years = 30,000 TB = <strong>30 PB</strong> (petabytes).</li>
+    </ol>
+    <div class="stats">
+      <div class="stat"><b>1B</b><span>pages / month</span></div>
+      <div class="stat"><b>~400</b><span>pages / sec</span></div>
+      <div class="stat"><b>800</b><span>peak pages / sec</span></div>
+      <div class="stat"><b>500 TB</b><span>storage / month</span></div>
+      <div class="stat"><b>30 PB</b><span>storage for 5 years</span></div>
+    </div>
+    <div class="callout key"><div class="callout-title">What the numbers tell us</div>
+      <p>400-800 downloads a second is too much for one machine's network and CPU, so the crawler must be distributed across many servers. 30 PB of content is far beyond any single disk, so content storage is a large distributed store kept mostly on disk.</p>
+    </div>
+  </section>
+
+  <section><h2 id="step2-high-level">Step 2 - High-level design</h2>
+    <p>Here is the overall design. Every box is explained below, and then we walk through the numbered workflow.</p>
+    <div class="diagram"><div class="diagram-title">Web crawler high-level design (numbered workflow)</div>
+      <svg class="dg" viewBox="0 0 860 460">
+        <defs><marker id="c9m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="20" y="30" width="130" height="50" rx="8" class="a"/><text x="85" y="60" text-anchor="middle">Seed URLs</text>
+        <rect x="200" y="30" width="140" height="50" rx="8" class="y"/><text x="270" y="60" text-anchor="middle">URL Frontier</text>
+        <rect x="400" y="30" width="160" height="50" rx="8" class="s"/><text x="480" y="60" text-anchor="middle">HTML Downloader</text>
+        <rect x="620" y="30" width="140" height="50" rx="8"/><text x="690" y="60" text-anchor="middle">DNS Resolver</text>
+        <rect x="400" y="140" width="160" height="50" rx="8" class="s"/><text x="480" y="170" text-anchor="middle">Content Parser</text>
+        <path d="M480,235 L560,265 L480,295 L400,265 Z" class="p"/><text x="480" y="262" text-anchor="middle">Content</text><text x="480" y="278" text-anchor="middle">Seen?</text>
+        <rect x="640" y="240" width="170" height="50" rx="8" class="p"/><text x="725" y="270" text-anchor="middle">Content Storage</text>
+        <rect x="400" y="340" width="160" height="50" rx="8" class="g"/><text x="480" y="370" text-anchor="middle">URL Extractor</text>
+        <rect x="200" y="340" width="140" height="50" rx="8" class="g"/><text x="270" y="370" text-anchor="middle">URL Filter</text>
+        <path d="M270,235 L345,265 L270,295 L195,265 Z" class="r"/><text x="270" y="262" text-anchor="middle">URL</text><text x="270" y="278" text-anchor="middle">Seen?</text>
+        <rect x="20" y="240" width="130" height="50" rx="8" class="r"/><text x="85" y="270" text-anchor="middle">URL Storage</text>
+
+        <line x1="150" y1="55" x2="198" y2="55" marker-end="url(#c9m2)"/><text x="174" y="47" text-anchor="middle" class="sm">1</text>
+        <line x1="340" y1="55" x2="398" y2="55" marker-end="url(#c9m2)"/><text x="369" y="47" text-anchor="middle" class="sm">2</text>
+        <line x1="560" y1="55" x2="618" y2="55" marker-end="url(#c9m2)"/><text x="589" y="47" text-anchor="middle" class="sm">3</text>
+        <line x1="480" y1="80" x2="480" y2="138" marker-end="url(#c9m2)"/><text x="492" y="114" class="sm">4</text>
+        <line x1="480" y1="190" x2="480" y2="233" marker-end="url(#c9m2)"/><text x="492" y="216" class="sm">5</text>
+        <line x1="560" y1="265" x2="638" y2="265" marker-end="url(#c9m2)"/><text x="599" y="257" text-anchor="middle" class="sm">6 / 7</text>
+        <text x="600" y="285" text-anchor="middle" class="sm">new</text>
+        <line x1="480" y1="295" x2="480" y2="338" marker-end="url(#c9m2)"/><text x="492" y="322" class="sm">8</text>
+        <text x="420" y="322" class="sm">new</text>
+        <line x1="400" y1="365" x2="342" y2="365" marker-end="url(#c9m2)"/><text x="371" y="357" text-anchor="middle" class="sm">9</text>
+        <line x1="270" y1="340" x2="270" y2="297" marker-end="url(#c9m2)"/><text x="282" y="322" class="sm">10</text>
+        <line x1="195" y1="265" x2="152" y2="265" marker-end="url(#c9m2)"/><text x="172" y="257" text-anchor="middle" class="sm">11</text>
+        <line x1="270" y1="235" x2="270" y2="82" marker-end="url(#c9m2)"/><text x="282" y="160" class="sm">11 (new)</text>
+        <text x="430" y="440" text-anchor="middle" class="sm">Seen content is discarded at step 6; seen URLs are dropped at step 10.</text>
+      </svg>
+      <div class="diagram-caption">Pages flow down the right side (download, parse, dedupe, store). Links flow back up the left side (extract, filter, dedupe) into the frontier, closing the loop.</div>
+    </div>
+
+    <h3>Each component, explained</h3>
+    <dl class="terms">
+      <dt>Seed URLs</dt><dd>The starting point. A good seed set lets the crawler reach as many links as possible. For a university site, the domain name might be enough. For the whole web, be creative: divide the URL space into smaller parts, either <strong>by locality</strong> (different countries have different popular websites) or <strong>by topic</strong> (shopping, sports, healthcare and so on). The choice is open-ended - you are not expected to give the perfect answer.</dd>
+      <dt>URL Frontier</dt><dd>Most modern crawlers split crawl state into two: <em>to be downloaded</em> and <em>already downloaded</em>. The component storing URLs to be downloaded is the URL frontier. Think of it as a FIFO queue for now; the deep dive makes it smarter.</dd>
+      <dt>HTML Downloader</dt><dd>Downloads web pages from the internet. The URLs come from the URL frontier.</dd>
+      <dt>DNS Resolver</dt><dd>To download a page, a URL must be translated into an IP address. The downloader asks the DNS resolver for the IP. For example, <code>www.wikipedia.org</code> is converted to <code>198.35.26.96</code> (as of the book's writing).</dd>
+      <dt>Content Parser</dt><dd>After download, the page must be parsed and validated, because malformed pages can cause problems and waste storage. Running the parser inside the crawl servers would slow crawling, so it is a <strong>separate component</strong>.</dd>
+      <dt>Content Seen?</dt><dd>Research shows about <strong>29% of web pages are duplicated content</strong>, which may cause the same content to be stored multiple times. This component removes redundancy. Comparing two pages character by character is slow and time-consuming, so instead we <strong>compare the hash values</strong> of the two pages.</dd>
+      <dt>Content Storage</dt><dd>Stores HTML content. Choice depends on data type, size, access frequency and life span. Both disk and memory are used: <strong>most content is stored on disk</strong> because the data set is too big for memory, and <strong>popular content is kept in memory</strong> to reduce latency.</dd>
+      <dt>URL Extractor</dt><dd>Parses and extracts links from HTML pages. Relative paths are converted to absolute URLs by adding the prefix (see the example below).</dd>
+      <dt>URL Filter</dt><dd>Excludes certain content types, file extensions, error links and URLs on "blacklisted" sites.</dd>
+      <dt>URL Seen?</dt><dd>Keeps track of URLs that have been visited before or are already in the frontier. This avoids adding the same URL multiple times, which would increase server load and cause potential infinite loops. <strong>Bloom filters and hash tables</strong> are common techniques to implement it.</dd>
+      <dt>URL Storage</dt><dd>Stores already-visited URLs.</dd>
+    </dl>
+
+    <h3>Example: relative to absolute URLs</h3>
+    <p>On the page <code>https://en.wikipedia.org/wiki/Web_crawler</code>, links are often written in short, relative form. The URL extractor adds the prefix <code>https://en.wikipedia.org</code> to make them complete:</p>
+    <div class="diagram"><div class="diagram-title">URL extractor turns relative links into absolute links</div>
+      <div class="flow">
+        <div class="node">HTML snippet<small>&lt;a href="/wiki/Cong_Weixi"&gt;<br>&lt;a href="/wiki/Kay_Hagan"&gt;<br>&lt;a href="/wiki/Vladimir_Bukovsky"&gt;<br>&lt;a href="/wiki/John_Conyers"&gt;</small></div>
+        <div class="arrow">→<small>add prefix https://en.wikipedia.org</small></div>
+        <div class="node green">Absolute URLs<small>https://en.wikipedia.org/wiki/Cong_Weixi<br>https://en.wikipedia.org/wiki/Kay_Hagan<br>https://en.wikipedia.org/wiki/Vladimir_Bukovsky<br>https://en.wikipedia.org/wiki/John_Conyers</small></div>
+      </div>
+      <div class="diagram-caption">Without this step, "/wiki/Kay_Hagan" is meaningless to the downloader, which needs a full URL with the host.</div>
+    </div>
+
+    <h3>The web crawler workflow, step by step</h3>
+    <ol class="steps">
+      <li><strong>Add seed URLs</strong> to the URL frontier.</li>
+      <li><strong>The HTML downloader fetches a list of URLs</strong> from the URL frontier.</li>
+      <li><strong>The HTML downloader gets the IP addresses</strong> of the URLs from the DNS resolver and starts downloading.</li>
+      <li><strong>The content parser</strong> parses the HTML pages and checks whether the pages are malformed.</li>
+      <li><strong>After parsing and validation</strong>, the content is passed to the "Content Seen?" component.</li>
+      <li><strong>"Content Seen?"</strong> checks whether the page is already in storage. If it is, the same content at a different URL has already been processed, so the page is discarded.</li>
+      <li><strong>If it is not in storage</strong>, the system has not processed it before, and the content is passed to the link extractor (and saved to content storage).</li>
+      <li><strong>The link extractor</strong> extracts links from the HTML pages.</li>
+      <li><strong>Extracted links are passed to the URL filter.</strong></li>
+      <li><strong>After filtering</strong>, links go to the "URL Seen?" component.</li>
+      <li><strong>"URL Seen?" checks</strong> whether a URL is already in storage; if yes, it was processed before and nothing needs to be done. If not, it is added to the URL frontier (and recorded in URL storage).</li>
+    </ol>
+  </section>
+
+  <section><h2 id="dfs-vs-bfs">Step 3 - Deep dive: DFS vs BFS</h2>
+    <p>You can think of the web as a <strong>directed graph</strong>: web pages are nodes and hyperlinks (URLs) are edges. Crawling is traversing that graph. The two classic ways to traverse a graph are:</p>
+    <div class="cards">
+      <div class="card red"><h4>DFS (depth-first search)</h4><p>Follow one link, then the first link on that page, then the first link on that one... going as deep as possible before backing up. <strong>Usually not a good choice</strong>, because the depth of the web can be very deep and the crawler can wander off forever.</p></div>
+      <div class="card green"><h4>BFS (breadth-first search)</h4><p>Visit all links on the current page first, then all links on those pages, level by level. <strong>Commonly used</strong> by crawlers, implemented with a <strong>FIFO queue</strong>: URLs are dequeued in the order they were enqueued.</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">BFS order on a tiny web graph</div>
+      <svg class="dg" viewBox="0 0 640 250">
+        <defs><marker id="c9m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <circle cx="320" cy="35" r="22" class="a"/><text x="320" y="40" text-anchor="middle">1</text>
+        <circle cx="160" cy="120" r="22"/><text x="160" y="125" text-anchor="middle">2</text>
+        <circle cx="320" cy="120" r="22"/><text x="320" y="125" text-anchor="middle">3</text>
+        <circle cx="480" cy="120" r="22"/><text x="480" y="125" text-anchor="middle">4</text>
+        <circle cx="100" cy="205" r="22"/><text x="100" y="210" text-anchor="middle">5</text>
+        <circle cx="220" cy="205" r="22"/><text x="220" y="210" text-anchor="middle">6</text>
+        <circle cx="420" cy="205" r="22"/><text x="420" y="210" text-anchor="middle">7</text>
+        <circle cx="540" cy="205" r="22"/><text x="540" y="210" text-anchor="middle">8</text>
+        <line x1="304" y1="50" x2="178" y2="106" marker-end="url(#c9m3)"/>
+        <line x1="320" y1="57" x2="320" y2="96" marker-end="url(#c9m3)"/>
+        <line x1="336" y1="50" x2="462" y2="106" marker-end="url(#c9m3)"/>
+        <line x1="148" y1="139" x2="111" y2="185" marker-end="url(#c9m3)"/>
+        <line x1="172" y1="139" x2="208" y2="185" marker-end="url(#c9m3)"/>
+        <line x1="468" y1="139" x2="432" y2="185" marker-end="url(#c9m3)"/>
+        <line x1="492" y1="139" x2="528" y2="185" marker-end="url(#c9m3)"/>
+        <text x="600" y="40" text-anchor="middle" class="sm">level 0</text>
+        <text x="600" y="125" text-anchor="middle" class="sm">level 1</text>
+        <text x="600" y="240" text-anchor="middle" class="sm">level 2</text>
+      </svg>
+      <div class="diagram-caption">BFS visits nodes in number order: the whole of one level before the next. A FIFO queue achieves this naturally - add children to the back, take the next URL from the front.</div>
+    </div>
+    <h3>Two problems with plain BFS</h3>
+    <ol class="steps">
+      <li><strong>It is impolite.</strong> Most links on a page link back to the <em>same host</em>. For example, nearly all links on <code>wikipedia.com</code> are internal links to other Wikipedia pages. When the crawler processes them in parallel, Wikipedia servers get flooded with requests. This is considered "impolite".</li>
+      <li><strong>It has no priority.</strong> Standard BFS treats every page equally. But not every page has the same quality and importance. We may want to prioritise URLs by ranking, web traffic, update frequency and so on.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Why plain BFS is impolite</div>
+      <div class="flow">
+        <div class="node accent">wikipedia.com/wiki/Web_crawler</div>
+        <div class="arrow">→<small>extract links</small></div>
+        <div class="node yellow">FIFO queue<small>wikipedia.com/a<br>wikipedia.com/b<br>wikipedia.com/c<br>wikipedia.com/d ...</small></div>
+        <div class="arrow">→<small>many workers at once</small></div>
+        <div class="node red">wikipedia.com servers<small>flooded</small></div>
+      </div>
+      <div class="diagram-caption">The queue fills with URLs from one host, so parallel workers all hammer that host at the same moment.</div>
+    </div>
+    <p>The <strong>URL frontier</strong> solves both problems.</p>
+  </section>
+
+  <section><h2 id="url-frontier">URL frontier</h2>
+    <p>The URL frontier is a data structure that stores URLs to be downloaded. It is the key component that ensures <strong>politeness</strong>, <strong>URL prioritization</strong> and <strong>freshness</strong>.</p>
+
+    <h3>Politeness</h3>
+    <p>A crawler should avoid sending too many requests to the same hosting server within a short period. Sending too many can be seen as "impolite" or even treated as a denial-of-service (DoS) attack.</p>
+    <p>The general idea: <strong>download one page at a time from the same host</strong>, and add a <strong>delay</strong> between two download tasks. We do this by keeping a mapping from website hostnames to download (worker) threads. Each downloader thread has its own FIFO queue and only downloads URLs from that queue.</p>
+    <div class="diagram"><div class="diagram-title">Politeness design (back queues)</div>
+      <svg class="dg" viewBox="0 0 820 420">
+        <defs><marker id="c9m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="330" y="15" width="160" height="44" rx="8" class="a"/><text x="410" y="42" text-anchor="middle">Queue router</text>
+        <rect x="560" y="10" width="240" height="110" rx="8" class="y"/>
+        <text x="680" y="32" text-anchor="middle" class="y">Mapping table</text>
+        <text x="600" y="56" class="sm">wikipedia.com</text><text x="770" y="56" text-anchor="end" class="sm">b1</text>
+        <text x="600" y="78" class="sm">apple.com</text><text x="770" y="78" text-anchor="end" class="sm">b2</text>
+        <text x="600" y="100" class="sm">nike.com</text><text x="770" y="100" text-anchor="end" class="sm">bn</text>
+        <line x1="490" y1="37" x2="558" y2="50" stroke-dasharray="4 4"/>
+        <line x1="370" y1="59" x2="150" y2="140" marker-end="url(#c9m4)"/>
+        <line x1="410" y1="59" x2="410" y2="140" marker-end="url(#c9m4)"/>
+        <line x1="450" y1="59" x2="670" y2="140" marker-end="url(#c9m4)"/>
+        <rect x="90" y="142" width="120" height="110" rx="8"/><text x="150" y="168" text-anchor="middle">b1</text>
+        <rect x="105" y="180" width="90" height="18" rx="3" class="s"/><rect x="105" y="202" width="90" height="18" rx="3" class="s"/><rect x="105" y="224" width="90" height="18" rx="3" class="s"/>
+        <rect x="350" y="142" width="120" height="110" rx="8"/><text x="410" y="168" text-anchor="middle">b2</text>
+        <rect x="365" y="180" width="90" height="18" rx="3" class="s"/><rect x="365" y="202" width="90" height="18" rx="3" class="s"/><rect x="365" y="224" width="90" height="18" rx="3" class="s"/>
+        <text x="540" y="200" text-anchor="middle">...</text>
+        <rect x="610" y="142" width="120" height="110" rx="8"/><text x="670" y="168" text-anchor="middle">bn</text>
+        <rect x="625" y="180" width="90" height="18" rx="3" class="s"/><rect x="625" y="202" width="90" height="18" rx="3" class="s"/><rect x="625" y="224" width="90" height="18" rx="3" class="s"/>
+        <text x="410" y="275" text-anchor="middle" class="sm">FIFO queues - each holds URLs from one host only</text>
+        <line x1="150" y1="252" x2="370" y2="300" marker-end="url(#c9m4)"/>
+        <line x1="410" y1="252" x2="410" y2="300" marker-end="url(#c9m4)"/>
+        <line x1="670" y1="252" x2="450" y2="300" marker-end="url(#c9m4)"/>
+        <rect x="330" y="302" width="160" height="44" rx="8" class="a"/><text x="410" y="329" text-anchor="middle">Queue selector</text>
+        <line x1="360" y1="346" x2="160" y2="370" marker-end="url(#c9m4)"/>
+        <line x1="410" y1="346" x2="410" y2="370" marker-end="url(#c9m4)"/>
+        <line x1="460" y1="346" x2="660" y2="370" marker-end="url(#c9m4)"/>
+        <rect x="80" y="372" width="160" height="40" rx="8" class="g"/><text x="160" y="397" text-anchor="middle">Worker thread 1</text>
+        <rect x="330" y="372" width="160" height="40" rx="8" class="g"/><text x="410" y="397" text-anchor="middle">Worker thread 2</text>
+        <rect x="580" y="372" width="160" height="40" rx="8" class="g"/><text x="660" y="397" text-anchor="middle">Worker thread N</text>
+      </svg>
+      <div class="diagram-caption">The router puts every URL from the same host into the same queue. Each worker handles one queue at a time, one URL after another, with a pause in between. So no host ever sees more than one request at a time from us.</div>
+    </div>
+    <ul>
+      <li><strong>Queue router:</strong> ensures that each queue (b1, b2, ... bn) only contains URLs from the same host.</li>
+      <li><strong>Mapping table:</strong> maps each host to a queue (e.g. wikipedia.com &rarr; b1, apple.com &rarr; b2, nike.com &rarr; bn).</li>
+      <li><strong>FIFO queues b1 to bn:</strong> each queue contains URLs from the same host.</li>
+      <li><strong>Queue selector:</strong> each worker thread is mapped to a FIFO queue, and only downloads URLs from that queue. The queue selection logic is done by the queue selector.</li>
+      <li><strong>Worker threads 1 to N:</strong> a worker thread downloads web pages one by one from the same host. A delay can be added between two download tasks.</li>
+    </ul>
+
+    <h3>Priority</h3>
+    <p>A random post on a discussion forum about Apple products carries very different weight than a post on the Apple home page. Both contain the "Apple" keyword, but it is sensible for a crawler to crawl the Apple home page first. We prioritise URLs based on <strong>usefulness</strong>, which can be measured by PageRank, website traffic, update frequency and so on. A <strong>prioritizer</strong> is the component that handles this.</p>
+    <div class="diagram"><div class="diagram-title">Priority design (front queues)</div>
+      <svg class="dg" viewBox="0 0 760 360">
+        <defs><marker id="c9m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="320" y="10" width="120" height="36" rx="8"/><text x="380" y="33" text-anchor="middle">Input URLs</text>
+        <line x1="380" y1="46" x2="380" y2="72" marker-end="url(#c9m5)"/>
+        <rect x="300" y="74" width="160" height="44" rx="8" class="p"/><text x="380" y="101" text-anchor="middle">Prioritizer</text>
+        <line x1="340" y1="118" x2="160" y2="150" marker-end="url(#c9m5)"/>
+        <line x1="380" y1="118" x2="380" y2="150" marker-end="url(#c9m5)"/>
+        <line x1="420" y1="118" x2="600" y2="150" marker-end="url(#c9m5)"/>
+        <rect x="100" y="152" width="120" height="70" rx="8" class="r"/><text x="160" y="180" text-anchor="middle">f1</text><text x="160" y="200" text-anchor="middle" class="sm">high priority</text>
+        <rect x="320" y="152" width="120" height="70" rx="8" class="y"/><text x="380" y="180" text-anchor="middle">f2</text><text x="380" y="200" text-anchor="middle" class="sm">medium</text>
+        <text x="490" y="190" text-anchor="middle">...</text>
+        <rect x="540" y="152" width="120" height="70" rx="8" class="g"/><text x="600" y="180" text-anchor="middle">fn</text><text x="600" y="200" text-anchor="middle" class="sm">low priority</text>
+        <line x1="160" y1="222" x2="350" y2="262" marker-end="url(#c9m5)" class="r"/>
+        <line x1="380" y1="222" x2="380" y2="262" marker-end="url(#c9m5)"/>
+        <line x1="600" y1="222" x2="410" y2="262" marker-end="url(#c9m5)"/>
+        <rect x="300" y="264" width="160" height="44" rx="8" class="a"/><text x="380" y="291" text-anchor="middle">Queue selector</text>
+        <line x1="380" y1="308" x2="380" y2="334" marker-end="url(#c9m5)"/>
+        <text x="380" y="352" text-anchor="middle" class="sm">output: URLs, biased toward higher-priority queues</text>
+      </svg>
+      <div class="diagram-caption">The prioritizer computes a priority for each URL and places it in the matching front queue. The queue selector picks queues randomly but with a bias toward high-priority ones.</div>
+    </div>
+    <ul>
+      <li><strong>Prioritizer:</strong> takes URLs as input and computes their priorities.</li>
+      <li><strong>Queues f1 to fn:</strong> each queue has an assigned priority. Queues with high priority are selected with higher probability.</li>
+      <li><strong>Queue selector:</strong> randomly chooses a queue with a bias toward queues with higher priority.</li>
+    </ul>
+    <div class="callout info"><div class="callout-title">Why "random with a bias" instead of "always highest first"?</div>
+      <p>If the selector always drained f1 first, low-priority pages might never be crawled (starvation). A biased random choice crawls important pages much more often while still making progress on everything else.</p>
+    </div>
+
+    <h3>Putting politeness and priority together</h3>
+    <p>The full URL frontier combines both designs:</p>
+    <ul>
+      <li><strong>Front queues</strong> manage prioritization.</li>
+      <li><strong>Back queues</strong> manage politeness.</li>
+    </ul>
+    <div class="diagram"><div class="diagram-title">URL frontier: front queues (priority) + back queues (politeness)</div>
+      <svg class="dg" viewBox="0 0 820 560">
+        <defs><marker id="c9m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="10" y="60" width="800" height="200" rx="10" stroke-dasharray="6 4"/>
+        <text x="30" y="82" class="p">Front queues (prioritization)</text>
+        <rect x="330" y="10" width="160" height="40" rx="8" class="p"/><text x="410" y="35" text-anchor="middle">Prioritizer</text>
+        <line x1="370" y1="50" x2="180" y2="98" marker-end="url(#c9m6)"/>
+        <line x1="410" y1="50" x2="410" y2="98" marker-end="url(#c9m6)"/>
+        <line x1="450" y1="50" x2="640" y2="98" marker-end="url(#c9m6)"/>
+        <rect x="120" y="100" width="120" height="60" rx="8" class="r"/><text x="180" y="135" text-anchor="middle">f1</text>
+        <rect x="350" y="100" width="120" height="60" rx="8" class="y"/><text x="410" y="135" text-anchor="middle">f2</text>
+        <text x="525" y="135" text-anchor="middle">...</text>
+        <rect x="580" y="100" width="120" height="60" rx="8" class="g"/><text x="640" y="135" text-anchor="middle">fn</text>
+        <line x1="180" y1="160" x2="380" y2="198" marker-end="url(#c9m6)"/>
+        <line x1="410" y1="160" x2="410" y2="198" marker-end="url(#c9m6)"/>
+        <line x1="640" y1="160" x2="440" y2="198" marker-end="url(#c9m6)"/>
+        <rect x="310" y="200" width="200" height="40" rx="8" class="a"/><text x="410" y="225" text-anchor="middle">Front queue selector</text>
+        <line x1="410" y1="240" x2="410" y2="298" marker-end="url(#c9m6)"/>
+        <rect x="10" y="280" width="800" height="270" rx="10" stroke-dasharray="6 4"/>
+        <text x="30" y="302" class="s">Back queues (politeness)</text>
+        <rect x="330" y="300" width="160" height="40" rx="8" class="a"/><text x="410" y="325" text-anchor="middle">Back queue router</text>
+        <rect x="600" y="300" width="180" height="40" rx="8" class="y"/><text x="690" y="325" text-anchor="middle">Mapping table</text>
+        <line x1="490" y1="320" x2="598" y2="320" stroke-dasharray="4 4"/>
+        <line x1="370" y1="340" x2="180" y2="378" marker-end="url(#c9m6)"/>
+        <line x1="410" y1="340" x2="410" y2="378" marker-end="url(#c9m6)"/>
+        <line x1="450" y1="340" x2="640" y2="378" marker-end="url(#c9m6)"/>
+        <rect x="120" y="380" width="120" height="50" rx="8" class="s"/><text x="180" y="410" text-anchor="middle">b1</text>
+        <rect x="350" y="380" width="120" height="50" rx="8" class="s"/><text x="410" y="410" text-anchor="middle">b2</text>
+        <text x="525" y="410" text-anchor="middle">...</text>
+        <rect x="580" y="380" width="120" height="50" rx="8" class="s"/><text x="640" y="410" text-anchor="middle">bn</text>
+        <line x1="180" y1="430" x2="380" y2="458" marker-end="url(#c9m6)"/>
+        <line x1="410" y1="430" x2="410" y2="458" marker-end="url(#c9m6)"/>
+        <line x1="640" y1="430" x2="440" y2="458" marker-end="url(#c9m6)"/>
+        <rect x="310" y="460" width="200" height="36" rx="8" class="a"/><text x="410" y="483" text-anchor="middle">Back queue selector</text>
+        <line x1="360" y1="496" x2="180" y2="508" marker-end="url(#c9m6)"/>
+        <line x1="410" y1="496" x2="410" y2="508" marker-end="url(#c9m6)"/>
+        <line x1="460" y1="496" x2="640" y2="508" marker-end="url(#c9m6)"/>
+        <rect x="110" y="510" width="140" height="32" rx="8" class="g"/><text x="180" y="531" text-anchor="middle">Worker 1</text>
+        <rect x="340" y="510" width="140" height="32" rx="8" class="g"/><text x="410" y="531" text-anchor="middle">Worker 2</text>
+        <rect x="570" y="510" width="140" height="32" rx="8" class="g"/><text x="640" y="531" text-anchor="middle">Worker N</text>
+      </svg>
+      <div class="diagram-caption">A URL first gets a priority (front queues), then is routed by host (back queues). Workers pull from back queues, so important pages come out first and no host is overloaded.</div>
+    </div>
+
+    <h3>Freshness</h3>
+    <p>Web pages are constantly being added, deleted and edited. A crawler must periodically <strong>recrawl</strong> downloaded pages to keep its data set fresh. Recrawling all URLs is time-consuming and resource intensive. Strategies to optimise freshness:</p>
+    <ul>
+      <li><strong>Recrawl based on web pages' update history.</strong> A news homepage that changes hourly is recrawled often; a page unchanged for years, rarely.</li>
+      <li><strong>Prioritize URLs and recrawl important pages first and more frequently.</strong></li>
+    </ul>
+
+    <h3>Storage for the URL frontier</h3>
+    <p>In real-world search engine crawls, the number of URLs in the frontier can be <strong>hundreds of millions</strong>. Where do we keep them?</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Option</th><th>Problem</th></tr>
+      <tr><td>Everything in memory</td><td>Neither durable (lost on crash) nor scalable (hundreds of millions of URLs).</td></tr>
+      <tr><td>Everything on disk</td><td>Disk is slow and easily becomes a bottleneck for crawling.</td></tr>
+      <tr><td><strong>Hybrid (chosen)</strong></td><td>The majority of URLs are stored on disk, so space is not a problem. To reduce the cost of reading and writing disk, we keep <strong>buffers in memory</strong> for enqueue/dequeue operations. Data in the buffer is periodically written to disk.</td></tr>
+    </table></div>
+  </section>
+
+  <section><h2 id="html-downloader">HTML downloader</h2>
+    <p>The HTML downloader downloads web pages from the internet using the HTTP protocol. Before discussing it, we need to look at the <strong>Robots Exclusion Protocol</strong>.</p>
+    <h3>robots.txt</h3>
+    <p>robots.txt is a standard used by websites to communicate with crawlers. It specifies which pages crawlers are allowed to download. Before crawling a site, a crawler should check its robots.txt first and follow its rules.</p>
+    <p>To avoid repeat downloads of the robots.txt file, we <strong>cache</strong> the results. The file is downloaded and saved to cache periodically. Here is a piece of Amazon's robots.txt, as shown in the book. Some directories like <code>creatorhub</code> are disallowed for Google's bot:</p>
+<pre><code>User-agent: Googlebot
+Disallow: /creatorhub/*
+Disallow: /rss/people/*/reviews
+Disallow: /gp/pdp/rss/*/reviews
+Disallow: /gp/cdp/member-reviews/
+Disallow: /gp/aw/cr/</code></pre>
+    <p><code>User-agent</code> says which crawler the rules apply to. Each <code>Disallow</code> line is a path pattern that crawler must not download.</p>
+
+    <h3>Performance optimization</h3>
+    <div class="cards">
+      <div class="card sky"><h4>1. Distributed crawl</h4><p>To achieve high performance, crawl jobs are distributed across multiple servers, and each server runs multiple threads. The URL space is partitioned into smaller pieces, so each downloader is responsible for a subset of URLs.</p></div>
+      <div class="card yellow"><h4>2. Cache DNS resolver</h4><p>DNS resolution is a bottleneck because DNS requests may take time (10ms to 200ms) and many DNS interfaces are synchronous: one thread's DNS request blocks others until done. Keep our own DNS cache (domain name &rarr; IP) updated periodically by cron jobs.</p></div>
+      <div class="card green"><h4>3. Locality</h4><p>Distribute crawl servers geographically. When crawl servers are closer to website hosts, download time is faster. Locality applies to most components: crawl servers, cache, queue, storage and so on.</p></div>
+      <div class="card red"><h4>4. Short timeout</h4><p>Some web servers respond slowly or not at all. To avoid long waits, specify a maximal wait time. If a host does not respond within a predefined time, the crawler stops the job and crawls other pages.</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Distributed crawl</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node yellow">URL Frontier<small>URL space partitioned</small></div></div>
+        <div class="arch-down">↓<small>each server gets a subset of URLs</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Crawl server 1</span><div class="node sky">thread</div><div class="node sky">thread</div></div>
+          <div class="group"><span class="group-label">Crawl server 2</span><div class="node sky">thread</div><div class="node sky">thread</div></div>
+          <div class="group"><span class="group-label">Crawl server N</span><div class="node sky">thread</div><div class="node sky">thread</div></div>
+        </div>
+        <div class="arch-down">↓<small>IP lookups served from local DNS cache</small></div>
+        <div class="arch-row"><div class="node green">The web<small>millions of hosts</small></div></div>
+      </div>
+      <div class="diagram-caption">Many servers, each with many threads, each responsible for its own slice of the URL space.</div>
+    </div>
+  </section>
+
+  <section><h2 id="robustness">Robustness</h2>
+    <p>Besides performance, robustness is just as important. The book lists these approaches:</p>
+    <ul>
+      <li><strong>Consistent hashing:</strong> helps distribute load among downloaders. A new downloader server can be added or removed using consistent hashing (Chapter 5) with minimal reshuffling.</li>
+      <li><strong>Save crawl states and data:</strong> to guard against failures, crawl states and data are written to a storage system. A disrupted crawl can be restarted easily by loading saved states and data.</li>
+      <li><strong>Exception handling:</strong> errors are inevitable and common in a large-scale system. The crawler must handle exceptions gracefully without crashing the system.</li>
+      <li><strong>Data validation:</strong> an important measure to prevent system errors.</li>
+    </ul>
+  </section>
+
+  <section><h2 id="extensibility">Extensibility</h2>
+    <p>As almost every system evolves, one design goal is to make the system flexible enough to support new content types. The crawler can be extended by plugging in new modules.</p>
+    <div class="diagram"><div class="diagram-title">Plugging in new modules</div>
+      <div class="flow">
+        <div class="node yellow">URL Frontier</div>
+        <div class="arrow">→</div>
+        <div class="node sky">HTML Downloader</div>
+        <div class="arrow">→</div>
+        <div class="node">Content Parser</div>
+        <div class="arrow">→</div>
+        <div class="group"><span class="group-label">Link extractor + plug-ins</span>
+          <div class="node green">URL Extractor<small>existing</small></div>
+          <div class="node pink">PNG Downloader<small>new plug-in</small></div>
+          <div class="node purple">Web Monitor<small>new plug-in</small></div>
+        </div>
+      </div>
+      <div class="diagram-caption">The PNG downloader module is plugged in to download PNG files. The web monitor module is added to monitor the web and prevent copyright and trademark infringements.</div>
+    </div>
+  </section>
+
+  <section><h2 id="problematic-content">Detect and avoid problematic content</h2>
+    <p>This section covers redundant, meaningless or harmful content.</p>
+    <h3>1. Redundant content</h3>
+    <p>As discussed, nearly 30% of web pages are duplicates. <strong>Hashes or checksums</strong> help detect duplication. For example, compute a hash of each page's content; if the hash already exists in storage, the page is a duplicate and is dropped.</p>
+    <h3>2. Spider traps</h3>
+    <p>A spider trap is a web page that causes a crawler to be stuck in an infinite loop. For instance, an infinitely deep directory structure:</p>
+<pre><code>www.spidertrapexample.com/foo/bar/foo/bar/foo/bar/...</code></pre>
+    <div class="diagram"><div class="diagram-title">A spider trap</div>
+      <svg class="dg" viewBox="0 0 720 150">
+        <defs><marker id="c9m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <rect x="10" y="40" width="120" height="44" rx="8" class="r"/><text x="70" y="67" text-anchor="middle">/foo</text>
+        <rect x="160" y="40" width="120" height="44" rx="8" class="r"/><text x="220" y="67" text-anchor="middle">/foo/bar</text>
+        <rect x="310" y="40" width="140" height="44" rx="8" class="r"/><text x="380" y="67" text-anchor="middle">/foo/bar/foo</text>
+        <rect x="480" y="40" width="170" height="44" rx="8" class="r"/><text x="565" y="67" text-anchor="middle">/foo/bar/foo/bar</text>
+        <text x="690" y="67" text-anchor="middle">...</text>
+        <line x1="130" y1="62" x2="158" y2="62" marker-end="url(#c9m7)"/>
+        <line x1="280" y1="62" x2="308" y2="62" marker-end="url(#c9m7)"/>
+        <line x1="450" y1="62" x2="478" y2="62" marker-end="url(#c9m7)"/>
+        <text x="360" y="120" text-anchor="middle" class="sm">Every page links to a "new" deeper URL, so URL Seen? never matches and the crawl never ends.</text>
+      </svg>
+      <div class="diagram-caption">Each URL is technically unique, so deduplication alone does not catch it.</div>
+    </div>
+    <p>How to avoid them:</p>
+    <ul>
+      <li><strong>Set a maximal length for URLs.</strong> Simple and catches the infinitely deep case.</li>
+      <li><strong>No one-size-fits-all solution.</strong> Websites containing spider traps are easy to identify because they have an unusually large number of web pages discovered. It is hard to build an automatic algorithm for all traps, but a user can <strong>manually verify and identify</strong> a spider trap, then either exclude those websites or apply customised URL filters.</li>
+    </ul>
+    <h3>3. Data noise</h3>
+    <p>Some content has little or no value, such as <strong>advertisements, code snippets, spam URLs</strong> and so on. These are not useful for crawlers and should be excluded if possible.</p>
+  </section>
+
+  <section><h2 id="step4-wrap-up">Step 4 - Wrap up</h2>
+    <p>We first discussed the characteristics of a good crawler (scalability, politeness, extensibility, robustness), proposed a design, and discussed key components. Building a scalable crawler is not trivial because the web is enormously large and full of traps. If there is time left, the book suggests these talking points:</p>
+    <div class="cards">
+      <div class="card purple"><h4>Server-side rendering</h4><p>Numerous websites use scripts like JavaScript and AJAX to generate links on the fly. If we download and parse pages directly, we will not retrieve those dynamic links. Server-side rendering (also called dynamic rendering) runs the scripts first, then parses the result.</p></div>
+      <div class="card red"><h4>Filter out unwanted pages</h4><p>With finite storage capacity and crawl resources, an anti-spam component helps filter out low-quality and spam pages.</p></div>
+      <div class="card green"><h4>Database replication and sharding</h4><p>Techniques like replication and sharding improve the data layer availability, scalability and reliability.</p></div>
+      <div class="card sky"><h4>Horizontal scaling</h4><p>For large-scale crawls, hundreds or even thousands of servers are needed. The key is to keep servers stateless.</p></div>
+      <div class="card yellow"><h4>Availability, consistency, reliability</h4><p>Core concepts for the success of any large system (see Chapter 1).</p></div>
+      <div class="card teal"><h4>Analytics</h4><p>Collecting and analysing data is important for any system, because data is a key ingredient for fine-tuning.</p></div>
+    </div>
+  </section>
+
+  <section><h2 id="putting-it-all-together">Putting it all together</h2>
+    <p>Here is the complete crawler with the deep-dive improvements folded into the high-level design.</p>
+    <div class="diagram"><div class="diagram-title">Final web crawler architecture</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Seed URLs<small>split by locality or topic</small></div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="group"><span class="group-label">URL Frontier (disk + memory buffers)</span><div class="node pink">Prioritizer + front queues<small>f1..fn</small></div><div class="node sky">Router + back queues<small>b1..bn, one host each</small></div></div></div>
+        <div class="arch-down">↓<small>worker threads pull URLs</small></div>
+        <div class="arch-row"><div class="group"><span class="group-label">Distributed HTML downloaders (consistent hashing)</span><div class="node sky">Downloader<small>robots.txt cache, short timeout</small></div><div class="node">DNS cache</div></div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node">Content parser<small>validate HTML</small></div><div class="node pink">Content seen?<small>hash compare</small></div><div class="node db pink">Content storage<small>disk + hot in memory</small></div></div>
+        <div class="arch-down">↓<small>new content only</small></div>
+        <div class="arch-row"><div class="node green">URL extractor<small>+ plug-ins (PNG, web monitor)</small></div><div class="node green">URL filter<small>types, blacklist, max length</small></div><div class="node red">URL seen?<small>Bloom filter / hash table</small></div><div class="node db red">URL storage</div></div>
+        <div class="arch-down">↓<small>new URLs loop back to the frontier</small></div>
+        <div class="arch-row"><div class="node yellow">Back to URL Frontier</div></div>
+      </div>
+      <div class="diagram-caption">The same 11-step loop as the high-level design, now with politeness, priority, freshness, robots.txt, DNS caching, deduplication and trap protection.</div>
+    </div>
+    <h3>Walkthrough: one URL's journey</h3>
+    <ol class="steps">
+      <li><strong>Seed:</strong> <code>https://en.wikipedia.org/wiki/Web_crawler</code> enters the frontier.</li>
+      <li><strong>Prioritize:</strong> the prioritizer scores it highly (popular site) and puts it in front queue f1.</li>
+      <li><strong>Route by host:</strong> the front queue selector picks it (biased toward f1); the back queue router looks up <code>en.wikipedia.org</code> in the mapping table and appends it to b1.</li>
+      <li><strong>Polite download:</strong> the worker for b1 waits for the delay since its last Wikipedia request, checks the cached robots.txt, gets the IP from the DNS cache and downloads with a short timeout.</li>
+      <li><strong>Parse and dedupe:</strong> the parser validates the HTML; the content hash is new, so the page is saved to content storage.</li>
+      <li><strong>Extract:</strong> links like <code>/wiki/Kay_Hagan</code> become <code>https://en.wikipedia.org/wiki/Kay_Hagan</code>.</li>
+      <li><strong>Filter and check:</strong> the URL filter drops unwanted types and over-long URLs; URL seen? drops ones already known.</li>
+      <li><strong>Loop:</strong> genuinely new URLs are recorded in URL storage and added to the frontier. Later, freshness logic schedules a recrawl of this page based on its update history.</li>
+    </ol>
+  </section>
+
+  <section><h2 id="interview">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Clarify requirements and estimate</div><div class="iv-time">3-10 min</div></div>
+      <ul><li>Ask: purpose, pages per month, content types, new/edited pages, storage period, duplicates.</li><li>State the four characteristics: scalability, robustness, politeness, extensibility.</li><li>Do the QPS and storage math.</li></ul>
+      <div class="say">"So this is for search engine indexing, 1 billion HTML pages a month, keep them 5 years, handle new and edited pages, ignore duplicates. 1 billion over 30 days is about 400 pages per second, 800 at peak. At 500 KB per page that is 500 TB a month and 30 PB over 5 years, so this is a distributed system with large disk-based storage."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">High-level design</div><div class="iv-time">10-15 min</div></div>
+      <ul><li>Draw the components and walk the 11-step loop.</li><li>Explain the two dedupe points: content seen? and URL seen?</li></ul>
+      <div class="say">"Seed URLs go into the URL frontier. The HTML downloader takes URLs, resolves them via DNS and downloads pages. The content parser validates them, Content Seen? compares hashes to drop duplicates, and new pages go to storage. The URL extractor pulls links, the URL filter removes unwanted ones, and URL Seen? - a Bloom filter or hash table - makes sure we only add new URLs back to the frontier."</div>
+      <div class="say them">"How do you choose seed URLs?"</div>
+      <div class="say">"Pick seeds that reach as much of the web as possible. I would partition the URL space, for example by country since popular sites differ by locality, or by topic like shopping, sports and healthcare, and pick popular sites from each."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Deep dive</div><div class="iv-time">10-25 min</div></div>
+      <ul><li>BFS over DFS, and BFS's two problems.</li><li>URL frontier: front queues (priority) and back queues (politeness); freshness; disk + memory buffers.</li><li>Downloader: robots.txt, distributed crawl, DNS cache, locality, short timeouts.</li><li>Robustness, extensibility, problematic content.</li></ul>
+      <div class="say">"I would use BFS with a FIFO queue, because the web is too deep for DFS. But plain BFS is impolite - links on a page usually point to the same host - and it has no priority. So I would make the frontier two layers: front queues where a prioritizer assigns URLs by PageRank or traffic, and back queues where a router maps each host to its own FIFO queue, with one worker per queue and a delay between downloads."</div>
+      <div class="say them">"DNS lookups are slow. What do you do?"</div>
+      <div class="say">"DNS can take 10 to 200 milliseconds and many DNS interfaces are synchronous, so it becomes a bottleneck. I would keep a local DNS cache mapping domain names to IPs, refreshed periodically by cron jobs."</div>
+      <div class="say them">"How do you avoid getting stuck in a spider trap?"</div>
+      <div class="say">"Set a maximum URL length to stop infinitely deep paths like /foo/bar/foo/bar. Sites with traps tend to produce an unusually large number of discovered pages, so we can flag those, verify manually, and exclude the site or add a custom URL filter."</div>
+      <div class="say them">"What if a crawl server crashes?"</div>
+      <div class="say">"Crawl states and data are saved to storage, so we restart from the saved state. Downloaders are assigned with consistent hashing, so removing or adding a server only moves a small part of the URL space."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3-5 min</div></div>
+      <ul><li>Server-side rendering, anti-spam filtering, DB replication and sharding, horizontal scaling with stateless servers, availability/consistency/reliability, analytics.</li></ul>
+      <div class="say">"Extra points: many links are created by JavaScript, so I would add server-side rendering. I would filter spam pages, replicate and shard the databases, keep servers stateless to scale to thousands, and collect analytics to tune the crawl."</div>
+    </div>
+  </section>
+
+  <section><h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Forgetting politeness</div><p>A design where many threads pull from one big FIFO queue will flood popular hosts. Always explain per-host back queues and delays.</p></div>
+    <div class="callout danger"><div class="callout-title">Choosing DFS</div><p>The web is extremely deep. DFS can wander down one site forever. Use BFS with a FIFO queue, improved by the URL frontier.</p></div>
+    <div class="callout warn"><div class="callout-title">Only one deduplication check</div><p>There are two: Content Seen? (same content at different URLs, via hashes) and URL Seen? (same URL found again, via Bloom filter or hash table). Mention both.</p></div>
+    <div class="callout warn"><div class="callout-title">Ignoring robots.txt</div><p>A real crawler must check and cache each site's robots.txt before crawling it.</p></div>
+    <div class="callout warn"><div class="callout-title">Keeping the frontier entirely in memory</div><p>Hundreds of millions of URLs are neither durable nor scalable in memory. Store most on disk with in-memory buffers.</p></div>
+    <div class="callout warn"><div class="callout-title">Treating DNS as free</div><p>DNS lookups take 10-200ms and are often synchronous. Without a DNS cache, they bottleneck the downloaders.</p></div>
+  </section>
+
+  <section><h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. What are the three steps of the basic crawl algorithm?</summary><div><p>Given seed URLs, download the pages; extract URLs from those pages; add the new URLs to the to-download list and repeat.</p></div></details>
+      <details><summary>2. Compute the average and peak QPS for 1 billion pages a month.</summary><div><p>1,000,000,000 / 30 / 24 / 3600 is about 386, rounded to ~400 pages per second. Peak is assumed to be 2x, so 800.</p></div></details>
+      <details><summary>3. How much storage is needed over 5 years if a page averages 500 KB?</summary><div><p>1 billion x 500 KB = 500 TB per month. 500 TB x 12 x 5 = 30 PB.</p></div></details>
+      <details><summary>4. Why is BFS preferred over DFS, and what two problems does plain BFS have?</summary><div><p>The web can be very deep, so DFS may go down one path forever. BFS (with a FIFO queue) explores level by level. Its problems: it is impolite, because most links on a page point to the same host so parallel workers flood it; and it has no priority, treating every page as equally important.</p></div></details>
+      <details><summary>5. Your crawler is hammering a small blog with 50 requests a second. Which part of the design fixes this and how?</summary><div><p>The back queues of the URL frontier. A queue router uses a mapping table to send all URLs from that blog's host to one FIFO queue. One worker thread handles that queue, downloading one page at a time with a delay in between.</p></div></details>
+      <details><summary>6. How does the queue selector in the front queues choose a queue, and why?</summary><div><p>Randomly, but with a bias toward higher-priority queues. Important pages get crawled more often, while lower-priority queues still get a turn instead of starving.</p></div></details>
+      <details><summary>7. What is the difference between "Content Seen?" and "URL Seen?"</summary><div><p>Content Seen? detects the same page content under different URLs by comparing hashes of the content (about 29-30% of pages are duplicates). URL Seen? detects a URL that has already been visited or is already in the frontier, using a Bloom filter or hash table, avoiding repeat work and infinite loops.</p></div></details>
+      <details><summary>8. Name four performance optimizations for the HTML downloader.</summary><div><p>Distributed crawl (many servers and threads, partitioned URL space), a cached DNS resolver, locality (crawl servers close to website hosts), and short timeouts for slow servers.</p></div></details>
+      <details><summary>9. Your crawler keeps discovering URLs like site.com/foo/bar/foo/bar/foo/... What is happening and what do you do?</summary><div><p>It is a spider trap: an infinitely deep directory structure. Set a maximum URL length; flag sites with an unusually large number of discovered pages, verify manually, then exclude them or apply custom URL filters.</p></div></details>
+      <details><summary>10. The product team now wants to crawl PNG images too. How does the design handle that?</summary><div><p>Through extensibility: plug in a new module, such as a PNG downloader, alongside the existing URL extractor. The rest of the pipeline is unchanged.</p></div></details>
+    </div>
+  </section>
+
+  <section><h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Uses: search engine indexing, web archiving, web mining, web monitoring.</li>
+      <li>Scope: indexing, 1B HTML pages/month, new + edited pages, store 5 years, ignore duplicates.</li>
+      <li>Goals: scalability, robustness, politeness, extensibility.</li>
+      <li>Math: ~400 QPS (800 peak); 500 KB/page &rarr; 500 TB/month &rarr; 30 PB over 5 years.</li>
+      <li>Loop: seeds &rarr; frontier &rarr; downloader (+DNS) &rarr; parser &rarr; content seen? &rarr; storage &rarr; URL extractor &rarr; filter &rarr; URL seen? &rarr; frontier.</li>
+      <li>BFS with a FIFO queue, not DFS. Plain BFS is impolite and has no priority.</li>
+      <li>Front queues (prioritizer, f1..fn, biased selector) = priority. Back queues (router, mapping table, b1..bn, one host each, worker + delay) = politeness.</li>
+      <li>Freshness: recrawl by update history; important pages first and more often.</li>
+      <li>Frontier storage: mostly disk, with in-memory buffers for enqueue/dequeue.</li>
+      <li>Downloader: obey and cache robots.txt; distributed crawl, DNS cache, locality, short timeout.</li>
+      <li>Robustness: consistent hashing, save crawl state, exception handling, data validation. Extensibility: plug-in modules.</li>
+      <li>Problematic content: duplicates (hashes), spider traps (max URL length, manual filters), data noise (ads, spam).</li>
+    </ul></div>
+  </section>
+</main>
+<script src="assets/app.js"></script></body></html>

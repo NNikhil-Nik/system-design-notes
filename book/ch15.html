@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 15: Design Google Drive</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="15">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 15</div><h1>Design Google Drive</h1>
+    <p class="lead">In this chapter you design a cloud file storage and sync service like Google Drive or Dropbox. You put a file in a folder on your laptop, and a moment later it shows up on your phone, safely stored and shareable. The big ideas are splitting files into blocks, syncing only what changed, strong consistency for metadata, and notifying devices when something changes.</p>
+    <div class="meta"><span class="tag">~40 min read</span><span class="tag">Advanced</span><span class="tag">Prerequisites: Ch 1 (scaling), Ch 2 (estimation), Ch 3 (framework), Ch 12 (long polling / WebSocket)</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>In recent years, cloud storage services such as <strong>Google Drive</strong>, <strong>Dropbox</strong>, <strong>Microsoft OneDrive</strong>, and <strong>Apple iCloud</strong> have become very popular. Google Drive is a file storage and synchronization service that helps you store documents, photos, videos, and other files in the cloud. You can access your files from any computer, smartphone, or tablet, and easily share them with friends, family, and coworkers.</p>
+    <p>What makes this hard?</p>
+    <ul>
+      <li><strong>Data loss is unacceptable.</strong> If a chat message is lost, it's annoying. If your tax documents or wedding photos vanish, it's a disaster.</li>
+      <li><strong>Files are big and change often.</strong> Re-uploading a 2 GB file because you changed one paragraph would waste time and bandwidth.</li>
+      <li><strong>Many devices, one truth.</strong> Your laptop, phone and work PC must all agree on what each file looks like, even when two of them edit at once.</li>
+    </ul>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Imagine a bank safe-deposit service with branches in every city. You hand a clerk a large binder. Instead of storing it as one heavy item, the clerk removes the pages, photocopies them into a secure vault in two cities, and writes a card in a catalogue saying "binder X = pages 1 to 40, version 3." When you replace page 7, they only swap page 7 and update the catalogue card. A messenger then calls your other branches: "binder X changed, come pick up the new page." The vault is cloud storage, the pages are blocks, the catalogue is the metadata database, and the messenger is the notification service.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Sync (synchronization)</dt><dd>Making sure all your devices have the same latest version of each file.</dd>
+      <dt>DAU</dt><dd>Daily active users.</dd>
+      <dt>QPS</dt><dd>Queries per second: how many requests the system handles each second.</dd>
+      <dt>Metadata</dt><dd>Information about a file rather than its contents: name, size, owner, version, which blocks it is made of.</dd>
+      <dt>Namespace</dt><dd>A user's own root directory. Every user's files live under their own namespace so they don't collide with others'.</dd>
+      <dt>Block</dt><dd>A piece of a file. Large files are split into blocks (up to 4 MB in Dropbox) that are stored and transferred separately.</dd>
+      <dt>Hash</dt><dd>A short fingerprint computed from data. The same data always gives the same hash, so it can identify a block and detect duplicates.</dd>
+      <dt>Delta sync</dt><dd>When a file changes, only the modified blocks are uploaded, not the whole file.</dd>
+      <dt>Compression</dt><dd>Making data smaller with an algorithm (gzip, bzip2) so it takes less storage and bandwidth.</dd>
+      <dt>Encryption</dt><dd>Scrambling data so only someone with the key can read it.</dd>
+      <dt>Block server</dt><dd>A server that splits files into blocks, compresses and encrypts them, and uploads them to cloud storage.</dd>
+      <dt>Cloud storage / Amazon S3</dt><dd>A managed object storage service. S3 stores files ("objects") durably and replicates them.</dd>
+      <dt>Cold storage</dt><dd>Very cheap storage for data that is rarely accessed, with slower retrieval. Example: Amazon S3 Glacier.</dd>
+      <dt>Replication (same-region / cross-region)</dt><dd>Keeping copies of data in multiple places, either within one geographic region or across different regions, so a failure doesn't lose data.</dd>
+      <dt>Sharding</dt><dd>Splitting data across multiple servers by some key (here, user_id).</dd>
+      <dt>Resumable upload</dt><dd>An upload that can continue from where it stopped after a network interruption.</dd>
+      <dt>Strong consistency</dt><dd>Every reader sees the latest write immediately. No device ever sees an outdated version after a change is confirmed.</dd>
+      <dt>ACID</dt><dd>Atomicity, Consistency, Isolation, Durability: guarantees from relational databases that transactions are all-or-nothing and safe.</dd>
+      <dt>Cache invalidation</dt><dd>Removing or updating a cached value when the underlying data changes, so the cache never serves stale data.</dd>
+      <dt>Long polling</dt><dd>The client sends a request and the server holds it open until there is news (or a timeout); then the client immediately asks again.</dd>
+      <dt>WebSocket</dt><dd>A persistent two-way connection between client and server.</dd>
+      <dt>Pub/sub</dt><dd>Publish/subscribe: publishers send events to a topic; all subscribers to that topic receive them.</dd>
+      <dt>Sync conflict</dt><dd>When two users or devices modify the same file at the same time.</dd>
+      <dt>Heartbeat</dt><dd>A periodic "I'm alive" signal between servers, used to detect failures.</dd>
+      <dt>HTTPS / SSL</dt><dd>HTTPS uses SSL/TLS to encrypt data between client and server so it can't be read in transit.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="step-1-requirements">Step 1: Understand the problem and scope</h2>
+    <p>Designing Google Drive is a big project, so asking questions to narrow the scope matters. The book's conversation:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Candidate asks</th><th>Interviewer answers</th></tr>
+      <tr><td>What are the most important features?</td><td>Upload and download files, file sync, and notifications.</td></tr>
+      <tr><td>Is this a mobile app, a web app, or both?</td><td>Both.</td></tr>
+      <tr><td>What are the supported file formats?</td><td>Any file type.</td></tr>
+      <tr><td>Do files need to be encrypted?</td><td>Yes, files in the storage must be encrypted.</td></tr>
+      <tr><td>Is there a file size limit?</td><td>Yes, files must be 10 GB or smaller.</td></tr>
+      <tr><td>How many users does the product have?</td><td>10M DAU.</td></tr>
+    </table></div>
+    <h3>Functional features (what it does)</h3>
+    <div class="cards">
+      <div class="card sky"><h4>Add files</h4><p>The easiest way is to drag and drop a file into Google Drive.</p></div>
+      <div class="card sky"><h4>Download files</h4><p>Get your files back on any device.</p></div>
+      <div class="card green"><h4>Sync across devices</h4><p>When a file is added to one device, it is automatically synced to other devices.</p></div>
+      <div class="card yellow"><h4>See file revisions</h4><p>Look at older versions of a file.</p></div>
+      <div class="card pink"><h4>Share files</h4><p>Share with friends, family, and coworkers.</p></div>
+      <div class="card purple"><h4>Notifications</h4><p>Send a notification when a file is edited, deleted, or shared with you.</p></div>
+    </div>
+    <div class="callout warn"><div class="callout-title">Out of scope</div>
+      <p>Google Docs-style editing and collaboration, where multiple people edit the same document simultaneously, is <strong>not</strong> covered in this chapter.</p>
+    </div>
+    <h3>Non-functional requirements (how well it does it)</h3>
+    <dl class="terms">
+      <dt>Reliability</dt><dd>Reliability is extremely important for a storage system. Data loss is unacceptable.</dd>
+      <dt>Fast sync speed</dt><dd>If file sync takes too much time, users become impatient and abandon the product.</dd>
+      <dt>Bandwidth usage</dt><dd>If a product takes a lot of unnecessary network bandwidth, users will be unhappy, especially on a mobile data plan.</dd>
+      <dt>Scalability</dt><dd>The system should handle high volumes of traffic.</dd>
+      <dt>High availability</dt><dd>Users should still be able to use the system when some servers are offline, slowed down, or have unexpected network errors.</dd>
+    </dl>
+
+    <h3>Back-of-the-envelope estimation</h3>
+    <p>Assumptions from the book:</p>
+    <ul>
+      <li>The application has 50 million signed-up users and 10 million DAU.</li>
+      <li>Users get 10 GB free space.</li>
+      <li>Users upload 2 files per day on average. The average file size is 500 KB.</li>
+      <li>1:1 read to write ratio.</li>
+    </ul>
+    <ol class="steps">
+      <li><strong>Total space allocated</strong> 50 million &times; 10 GB = 500,000,000 GB = <strong>500 Petabytes</strong>. (We allocate for every signed-up user, not just daily active ones.)</li>
+      <li><strong>Uploads per day</strong> 10 million DAU &times; 2 uploads = 20 million uploads per day.</li>
+      <li><strong>Upload QPS</strong> 20,000,000 &divide; 24 hours &divide; 3,600 seconds = 20,000,000 &divide; 86,400 &asymp; <strong>240 QPS</strong>.</li>
+      <li><strong>Peak QPS</strong> Assume peak is twice average: 240 &times; 2 = <strong>480 QPS</strong>.</li>
+    </ol>
+    <pre><code>Total space   = 50 million x 10 GB          = 500 PB
+QPS (upload)  = 10 million x 2 / 24 / 3600  = ~240
+Peak QPS      = QPS x 2                     = 480</code></pre>
+    <div class="stats">
+      <div class="stat"><b>500 PB</b><span>total space allocated</span></div>
+      <div class="stat"><b>~240</b><span>upload QPS</span></div>
+      <div class="stat"><b>480</b><span>peak upload QPS</span></div>
+      <div class="stat"><b>10 GB</b><span>max file size</span></div>
+    </div>
+    <div class="callout info"><div class="callout-title">What this tells us</div>
+      <p>The QPS is modest; one well-built cluster can handle it. The real challenge is <strong>storage volume</strong> (500 PB) and <strong>correctness</strong> (never losing or mixing up files). That's why the design focuses on storage, replication and consistency.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="single-server">Step 2: Start with a single server</h2>
+    <p>Instead of showing the final design right away, the book starts simple: <strong>everything on one server</strong>, then grows it. This is a great interview technique, because each step is motivated by a problem with the previous one.</p>
+    <p>The single-server setup:</p>
+    <ul>
+      <li>A <strong>web server</strong> to upload and download files (Apache).</li>
+      <li>A <strong>database</strong> to keep track of metadata like user data, login info, file info, etc. (MySQL).</li>
+      <li>A <strong>storage directory</strong> to store files. 1 TB of storage space is allocated.</li>
+    </ul>
+    <p>Under the <code>drive/</code> directory there is a list of directories called <strong>namespaces</strong>. Each namespace contains all the uploaded files for one user. The filename on the server is kept the same as the original. Each file can be uniquely identified by joining the namespace and the relative path.</p>
+    <div class="diagram"><div class="diagram-title">Storage layout on the single server</div>
+      <svg class="dg" viewBox="0 0 560 300">
+        <g>
+          <rect x="30" y="20" width="110" height="36" class="a"/><text x="85" y="43" text-anchor="middle">drive/</text>
+          <path d="M60,58 L60,268"/>
+          <path d="M60,90 L110,90"/><rect x="110" y="72" width="100" height="36" class="s"/><text x="160" y="95" text-anchor="middle">user1/</text>
+          <path d="M60,170 L110,170"/><rect x="110" y="152" width="100" height="36" class="s"/><text x="160" y="175" text-anchor="middle">user2/</text>
+          <path d="M60,250 L110,250"/><rect x="110" y="232" width="100" height="36" class="s"/><text x="160" y="255" text-anchor="middle">user3/</text>
+          <path d="M210,90 L270,90"/><rect x="270" y="74" width="120" height="32"/><text x="330" y="95" text-anchor="middle">recipes.txt</text>
+          <path d="M240,90 L240,130 L270,130"/><rect x="270" y="114" width="120" height="32"/><text x="330" y="135" text-anchor="middle">photo.png</text>
+          <path d="M210,170 L270,170"/><rect x="270" y="154" width="120" height="32"/><text x="330" y="175" text-anchor="middle">report.pdf</text>
+          <path d="M210,250 L270,250"/><rect x="270" y="234" width="120" height="32"/><text x="330" y="255" text-anchor="middle">taxes.xlsx</text>
+          <text x="410" y="95" class="sm">namespace + path</text>
+          <text x="410" y="112" class="sm">= user1/recipes.txt</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Each user gets a namespace folder under drive/. A file's unique identity is namespace + relative path, for example user1/recipes.txt.</div>
+    </div>
+
+    <h3>APIs</h3>
+    <p>We primarily need three APIs: upload a file, download a file, and get file revisions.</p>
+    <h4>1. Upload a file to Google Drive</h4>
+    <p>Two types of uploads are supported:</p>
+    <div class="cards">
+      <div class="card green"><h4>Simple upload</h4><p>Use this when the file size is small. One request, done.</p></div>
+      <div class="card sky"><h4>Resumable upload</h4><p>Use this when the file size is large and there is a high chance of network interruption.</p></div>
+    </div>
+    <pre><code>https://api.example.com/files/upload?uploadType=resumable
+
+Params:
+  uploadType = resumable
+  data       = local file to be uploaded</code></pre>
+    <p>A resumable upload is achieved by the following 3 steps:</p>
+    <ol class="steps">
+      <li><strong>Start</strong> Send the initial request to retrieve the resumable URL.</li>
+      <li><strong>Upload</strong> Upload the data and monitor upload state.</li>
+      <li><strong>Resume</strong> If upload is disturbed, resume the upload.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">Resumable upload</div>
+      <svg class="dg" viewBox="0 0 640 260">
+        <defs><marker id="gd-m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="40" y="15" width="120" height="36" class="a"/><text x="100" y="38">Client</text>
+          <rect x="480" y="15" width="120" height="36" class="s"/><text x="540" y="38">Server</text>
+          <line x1="100" y1="53" x2="100" y2="250" stroke-dasharray="4 4"/>
+          <line x1="540" y1="53" x2="540" y2="250" stroke-dasharray="4 4"/>
+          <line x1="100" y1="80" x2="536" y2="80" marker-end="url(#gd-m1)"/><text x="320" y="73" class="sm">1. start resumable upload</text>
+          <line x1="540" y1="105" x2="104" y2="105" marker-end="url(#gd-m1)"/><text x="320" y="98" class="sm">resumable URL</text>
+          <line x1="100" y1="135" x2="536" y2="135" marker-end="url(#gd-m1)"/><text x="320" y="128" class="sm">2. send bytes 0 - 60%</text>
+          <text x="320" y="160" class="r">network drops</text>
+          <line x1="100" y1="185" x2="536" y2="185" marker-end="url(#gd-m1)"/><text x="320" y="178" class="sm">3. resume: "where did we stop?"</text>
+          <line x1="100" y1="225" x2="536" y2="225" marker-end="url(#gd-m1)"/><text x="320" y="218" class="sm">send bytes 60% - 100%</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">If the connection breaks, the client doesn't start over. It uses the resumable URL to continue from the last confirmed byte.</div>
+    </div>
+    <h4>2. Download a file</h4>
+    <pre><code>https://api.example.com/files/download
+
+Params:
+  path = download file path
+
+Example:
+{
+  "path": "/recipes/soup/best_soup.txt"
+}</code></pre>
+    <h4>3. Get file revisions</h4>
+    <pre><code>https://api.example.com/files/list_revisions
+
+Params:
+  path  = the path to the file you want to get the revision history
+  limit = the maximum number of revisions to return
+
+Example:
+{
+  "path": "/recipes/soup/best_soup.txt",
+  "limit": 20
+}</code></pre>
+    <div class="callout key"><div class="callout-title">Security for every API</div>
+      <p>All the APIs require <strong>user authentication</strong> and use <strong>HTTPS</strong>. Secure Sockets Layer (SSL) protects data transfer between the client and backend servers.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="moving-away-from-single-server">Moving away from a single server</h2>
+    <p>As more files are uploaded, eventually you get the space-full alert: only 10 MB of storage space is left! Users can't upload files anymore. What now?</p>
+    <h3>Idea 1: shard the data</h3>
+    <p>The first solution that comes to mind is to shard the data so it is stored on multiple storage servers, for example by <code>user_id</code>.</p>
+    <div class="diagram"><div class="diagram-title">Sharding storage by user_id</div>
+      <svg class="dg" viewBox="0 0 640 200">
+        <defs><marker id="gd-m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="230" y="15" width="180" height="46" class="a"/><text x="320" y="36">Shard by user_id</text><text x="320" y="53" class="sm">e.g. user_id % 4</text>
+          <rect x="20" y="130" width="130" height="50" class="g"/><text x="85" y="152">Server 1</text><text x="85" y="169" class="sm">user_id % 4 = 0</text>
+          <rect x="175" y="130" width="130" height="50" class="g"/><text x="240" y="152">Server 2</text><text x="240" y="169" class="sm">user_id % 4 = 1</text>
+          <rect x="335" y="130" width="130" height="50" class="g"/><text x="400" y="152">Server 3</text><text x="400" y="169" class="sm">user_id % 4 = 2</text>
+          <rect x="490" y="130" width="130" height="50" class="g"/><text x="555" y="152">Server 4</text><text x="555" y="169" class="sm">user_id % 4 = 3</text>
+          <line x1="280" y1="63" x2="90" y2="126" marker-end="url(#gd-m2)"/>
+          <line x1="305" y1="63" x2="240" y2="126" marker-end="url(#gd-m2)"/>
+          <line x1="335" y1="63" x2="400" y2="126" marker-end="url(#gd-m2)"/>
+          <line x1="360" y1="63" x2="550" y2="126" marker-end="url(#gd-m2)"/>
+        </g>
+      </svg>
+      <div class="diagram-caption">Each user's files live on one storage server chosen from their user_id. This spreads storage but doesn't solve durability.</div>
+    </div>
+    <p>This works for now, but you are still worried about potential data loss if a storage server goes down or catches fire. You talk to colleagues, and they point out that Netflix and Airbnb use <strong>Amazon S3</strong> for storage.</p>
+    <h3>Idea 2: use Amazon S3</h3>
+    <p>Amazon Simple Storage Service (S3) is an object storage service that offers industry-leading scalability, data availability, security, and performance. S3 supports <strong>same-region</strong> and <strong>cross-region replication</strong>. A region is a geographic area where Amazon Web Services (AWS) have data centers. Data can be replicated within one region or across regions. Redundant files stored in multiple regions guard against data loss and ensure availability.</p>
+    <div class="diagram"><div class="diagram-title">S3 replication: same-region vs cross-region</div>
+      <svg class="dg" viewBox="0 0 700 240">
+        <defs><marker id="gd-m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="20" y="30" width="300" height="190" class="s" stroke-dasharray="5 4"/>
+          <text x="170" y="52" class="s">Region A (same-region replication)</text>
+          <rect x="50" y="80" width="110" height="50" class="g"/><text x="105" y="103">Bucket</text><text x="105" y="120" class="sm">data center 1</text>
+          <rect x="185" y="80" width="110" height="50" class="g"/><text x="240" y="103">Replica</text><text x="240" y="120" class="sm">data center 2</text>
+          <line x1="162" y1="105" x2="181" y2="105" marker-end="url(#gd-m3)"/>
+          <text x="170" y="170" class="sm">protects against one data center failing</text>
+          <rect x="380" y="30" width="300" height="190" class="p" stroke-dasharray="5 4"/>
+          <text x="530" y="52" class="p">Cross-region replication</text>
+          <rect x="400" y="80" width="110" height="50" class="g"/><text x="455" y="103">Bucket</text><text x="455" y="120" class="sm">Region A</text>
+          <rect x="550" y="80" width="110" height="50" class="g"/><text x="605" y="103">Replica</text><text x="605" y="120" class="sm">Region B</text>
+          <line x1="512" y1="105" x2="546" y2="105" marker-end="url(#gd-m3)"/>
+          <text x="530" y="170" class="sm">protects against a whole region going down</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Same-region replication copies data within one geographic region; cross-region replication copies it to another region, which survives even a regional disaster.</div>
+    </div>
+    <p>An S3 <strong>bucket</strong> is like a folder in a file system. After putting files in S3, you can sleep well without worrying about data loss.</p>
+
+    <h3>Further improvements</h3>
+    <p>To stop similar problems happening in the future, you research further and find areas to improve:</p>
+    <dl class="terms">
+      <dt>Load balancer</dt><dd>Add a load balancer to distribute network traffic. It ensures evenly distributed traffic, and if a web server goes down, it redirects the traffic.</dd>
+      <dt>Web servers</dt><dd>After a load balancer is added, more web servers can be added or removed easily, depending on the traffic load.</dd>
+      <dt>Metadata database</dt><dd>Move the database out of the server to avoid a single point of failure. Meanwhile, set up data replication and sharding to meet the availability and scalability requirements.</dd>
+      <dt>File storage</dt><dd>Amazon S3 is used for file storage. To ensure availability and durability, files are replicated in two separate geographical regions.</dd>
+    </dl>
+    <div class="diagram"><div class="diagram-title">After the improvements: compute, metadata and files are separated</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">User<small>web browser / mobile app</small></div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node">Load balancer</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row"><div class="node sky">Web server 1</div><div class="node sky">Web server 2</div><div class="node sky">Web server ...</div></div>
+        <div class="arch-down">↓</div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">Metadata DB (replicated + sharded)</span><div class="node db yellow">Shard 1</div><div class="node db yellow">Shard 2</div></div>
+          <div class="group"><span class="group-label">File storage (Amazon S3)</span><div class="node green">Region A</div><div class="node green">Region B</div></div>
+        </div>
+      </div>
+      <div class="diagram-caption">Web servers, metadata database, and file storage are decoupled from the original single server. Each part can now scale and fail independently.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="sync-conflicts">Sync conflicts</h2>
+    <p>For a large storage system like Google Drive, sync conflicts happen from time to time. When two users modify the same file or folder at the same time, a conflict happens. How do we resolve it?</p>
+    <p>The book's strategy: <strong>the first version that gets processed wins, and the version that gets processed later receives a conflict.</strong></p>
+    <div class="diagram"><div class="diagram-title">Sync conflict: user 1 wins, user 2 gets a conflict</div>
+      <svg class="dg" viewBox="0 0 680 280">
+        <defs><marker id="gd-m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="30" y="40" width="120" height="44" class="a"/><text x="90" y="67">User 1</text>
+          <rect x="30" y="190" width="120" height="44" class="p"/><text x="90" y="217">User 2</text>
+          <rect x="280" y="110" width="140" height="56" class="s"/><text x="350" y="134">Server</text><text x="350" y="152" class="sm">processes in order</text>
+          <line x1="152" y1="62" x2="276" y2="125" marker-end="url(#gd-m4)"/><text x="200" y="80" class="sm">edit file A</text>
+          <line x1="152" y1="212" x2="276" y2="152" marker-end="url(#gd-m4)"/><text x="200" y="198" class="sm">edit file A</text>
+          <rect x="500" y="40" width="160" height="44" class="g"/><text x="580" y="60">Synced</text><text x="580" y="76" class="sm">processed first</text>
+          <rect x="500" y="190" width="160" height="44" class="r"/><text x="580" y="210">Conflict</text><text x="580" y="226" class="sm">processed later</text>
+          <line x1="422" y1="125" x2="496" y2="65" marker-end="url(#gd-m4)"/>
+          <line x1="422" y1="152" x2="496" y2="210" marker-end="url(#gd-m4)"/>
+          <text x="580" y="265" class="sm">user 2 sees both copies</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Both users edit the same file at the same moment. User 1's change is processed first, so it syncs successfully. User 2's change arrives later and is flagged as a conflict.</div>
+    </div>
+    <p>How does user 2 resolve the conflict? The system presents <strong>both copies of the same file</strong>: user 2's local copy and the latest version from the server. User 2 has the option to <strong>merge both files</strong> or <strong>override one version with the other</strong>.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>File on user 2's device</th><th>Meaning</th></tr>
+      <tr><td><code>SystemDesignInterview</code></td><td>The latest version from the server (user 1's edit).</td></tr>
+      <tr><td><code>SystemDesignInterview_user 2_conflicted_copy_2019-05-01</code></td><td>User 2's local edit, kept so nothing is lost.</td></tr>
+    </table></div>
+    <div class="callout tip"><div class="callout-title">Why not just pick one silently?</div>
+      <p>Because "data loss is unacceptable." Silently overwriting would throw away someone's work. Keeping both copies and letting the human decide is safe and simple.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="high-level-design">High-level design</h2>
+    <p>Now we put the pieces together into the book's high-level design:</p>
+    <div class="diagram"><div class="diagram-title">High-level design</div>
+      <svg class="dg" viewBox="0 0 760 440">
+        <defs><marker id="gd-m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="300" y="15" width="160" height="50" class="a"/><text x="380" y="37">User</text><text x="380" y="54" class="sm">web / mobile app</text>
+          <rect x="30" y="130" width="140" height="50" class="p"/><text x="100" y="152">Block servers</text><text x="100" y="169" class="sm">split, compress, encrypt</text>
+          <rect x="310" y="130" width="140" height="44"/><text x="380" y="157">Load balancer</text>
+          <rect x="580" y="130" width="160" height="50" class="s"/><text x="660" y="152">Notification</text><text x="660" y="169" class="sm">service (pub/sub)</text>
+          <rect x="30" y="250" width="140" height="44" class="g"/><text x="100" y="277">Cloud storage</text>
+          <rect x="30" y="360" width="140" height="44" class="g"/><text x="100" y="387">Cold storage</text>
+          <rect x="310" y="240" width="140" height="44" class="s"/><text x="380" y="267">API servers</text>
+          <rect x="230" y="360" width="140" height="44" class="y"/><text x="300" y="387">Metadata cache</text>
+          <rect x="400" y="360" width="140" height="44" class="y"/><text x="470" y="387">Metadata DB</text>
+          <rect x="580" y="250" width="160" height="50" class="y"/><text x="660" y="272">Offline backup</text><text x="660" y="289" class="sm">queue</text>
+          <line x1="320" y1="67" x2="140" y2="126" marker-end="url(#gd-m5)"/><text x="215" y="88" class="sm">file blocks</text>
+          <line x1="380" y1="67" x2="380" y2="126" marker-end="url(#gd-m5)"/><text x="410" y="100" class="sm">API calls</text>
+          <line x1="440" y1="67" x2="620" y2="126" marker-end="url(#gd-m5)" marker-start="url(#gd-m5)"/><text x="560" y="88" class="sm">long polling</text>
+          <line x1="100" y1="182" x2="100" y2="246" marker-end="url(#gd-m5)"/>
+          <line x1="100" y1="296" x2="100" y2="356" marker-end="url(#gd-m5)"/><text x="135" y="330" class="sm">inactive data</text>
+          <line x1="380" y1="176" x2="380" y2="236" marker-end="url(#gd-m5)"/>
+          <line x1="350" y1="286" x2="310" y2="356" marker-end="url(#gd-m5)"/>
+          <line x1="410" y1="286" x2="460" y2="356" marker-end="url(#gd-m5)"/>
+          <line x1="452" y1="255" x2="576" y2="170" marker-end="url(#gd-m5)"/><text x="530" y="200" class="sm">events</text>
+          <line x1="660" y1="182" x2="660" y2="246" marker-end="url(#gd-m5)"/><text x="700" y="220" class="sm">offline users</text>
+          <line x1="172" y1="150" x2="306" y2="150" marker-end="url(#gd-m5)"/><text x="240" y="143" class="sm">update metadata</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">File contents flow through block servers to cloud storage (and later to cold storage). Metadata and everything else flows through the load balancer to API servers, which use the metadata cache and DB. The notification service tells clients when files change, and an offline backup queue holds changes for clients that are offline.</div>
+    </div>
+    <h3>Each component, explained</h3>
+    <dl class="terms">
+      <dt>User</dt><dd>Uses the application through a browser or mobile app.</dd>
+      <dt>Block servers</dt><dd>Upload blocks to cloud storage. Block storage, also referred to as block-level storage, is a technology to store data files in cloud-based environments. A file can be split into several blocks, each with a unique hash value, stored in our metadata database. Each block is treated as an independent object and stored in our storage system (S3). To reconstruct a file, blocks are joined in a particular order. As for block size, the book uses Dropbox as a reference: it sets the <strong>maximal size of a block to 4 MB</strong>. Block servers also compress and encrypt each block.</dd>
+      <dt>Cloud storage</dt><dd>A file is split into smaller blocks, and the blocks are stored in cloud storage.</dd>
+      <dt>Cold storage</dt><dd>A computer system designed for storing inactive data, meaning files that are not accessed for a long time.</dd>
+      <dt>Load balancer</dt><dd>Evenly distributes requests among API servers.</dd>
+      <dt>API servers</dt><dd>Responsible for almost everything other than the uploading flow: user authentication, managing user profile, updating file metadata, etc.</dd>
+      <dt>Metadata database</dt><dd>Stores metadata of users, files, blocks, versions, etc. Note: files are stored in the cloud; the metadata database only contains metadata.</dd>
+      <dt>Metadata cache</dt><dd>Some of the metadata is cached for fast retrieval.</dd>
+      <dt>Notification service</dt><dd>A publisher/subscriber system that transfers data from the notification service to clients as certain events happen. Here, it notifies relevant clients when a file is added/edited/removed elsewhere so they can pull the latest changes.</dd>
+      <dt>Offline backup queue</dt><dd>If a client is offline and cannot pull the latest file changes, the offline backup queue stores the info so changes will be synced when the client is online.</dd>
+    </dl>
+    <div class="callout key"><div class="callout-title">The core split</div>
+      <p>Notice the two separate paths: <strong>file content</strong> (heavy bytes) goes through block servers to cloud storage; <strong>metadata</strong> (small facts) goes through API servers to the database. Keeping them apart lets each be scaled and optimized on its own.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="block-servers">Step 3 deep dive: block servers</h2>
+    <p>For large files that are updated regularly, sending the whole file on each update consumes a lot of bandwidth. Two optimizations minimize the amount of network traffic:</p>
+    <div class="cards">
+      <div class="card green"><h4>Delta sync</h4><p>When a file is modified, only modified blocks are synced instead of the whole file, using a sync algorithm.</p></div>
+      <div class="card sky"><h4>Compression</h4><p>Applying compression on blocks can significantly reduce the data size. Blocks are compressed using algorithms that depend on file type: for example, <strong>gzip and bzip2</strong> are used to compress text files. Different compression algorithms are needed to compress images and videos.</p></div>
+    </div>
+    <p>Block servers do the heavy lifting for uploads. Here is how a new file is processed:</p>
+    <div class="diagram"><div class="diagram-title">Block server upload flow</div>
+      <svg class="dg" viewBox="0 0 760 210">
+        <defs><marker id="gd-m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="10" y="80" width="90" height="50" class="a"/><text x="55" y="110">File</text>
+          <rect x="130" y="20" width="440" height="170" class="p" stroke-dasharray="5 4"/>
+          <text x="350" y="42" class="p">Block server</text>
+          <rect x="150" y="80" width="110" height="50"/><text x="205" y="102">Split</text><text x="205" y="119" class="sm">into blocks</text>
+          <rect x="295" y="80" width="110" height="50"/><text x="350" y="102">Compress</text><text x="350" y="119" class="sm">each block</text>
+          <rect x="440" y="80" width="110" height="50"/><text x="495" y="102">Encrypt</text><text x="495" y="119" class="sm">each block</text>
+          <rect x="610" y="80" width="140" height="50" class="g"/><text x="680" y="102">Cloud storage</text><text x="680" y="119" class="sm">blocks as objects</text>
+          <line x1="102" y1="105" x2="146" y2="105" marker-end="url(#gd-m6)"/>
+          <line x1="262" y1="105" x2="291" y2="105" marker-end="url(#gd-m6)"/>
+          <line x1="407" y1="105" x2="436" y2="105" marker-end="url(#gd-m6)"/>
+          <line x1="552" y1="105" x2="606" y2="105" marker-end="url(#gd-m6)"/>
+          <text x="350" y="170" class="sm">each block gets a hash; hashes and order are saved in the metadata DB</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">A file is split into smaller blocks; each block is compressed, then encrypted before being sent to cloud storage.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Split</strong> A file is split into smaller blocks (max 4 MB each).</li>
+      <li><strong>Compress</strong> Each block is compressed using compression algorithms.</li>
+      <li><strong>Encrypt</strong> To ensure security, each block is encrypted before it is sent to cloud storage.</li>
+      <li><strong>Upload</strong> Blocks are uploaded to the cloud storage.</li>
+    </ol>
+    <p>Delta sync in action: suppose a file has 10 blocks and you edit two paragraphs that land in block 2 and block 5. Only those two blocks are uploaded.</p>
+    <div class="diagram"><div class="diagram-title">Delta sync: only changed blocks are uploaded</div>
+      <svg class="dg" viewBox="0 0 700 200">
+        <defs><marker id="gd-m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <text x="350" y="22" class="sm">a file split into blocks (blocks 2 and 5 were modified)</text>
+          <rect x="20" y="40" width="58" height="40"/><text x="49" y="65">1</text>
+          <rect x="88" y="40" width="58" height="40" class="r"/><text x="117" y="65" class="r">2</text>
+          <rect x="156" y="40" width="58" height="40"/><text x="185" y="65">3</text>
+          <rect x="224" y="40" width="58" height="40"/><text x="253" y="65">4</text>
+          <rect x="292" y="40" width="58" height="40" class="r"/><text x="321" y="65" class="r">5</text>
+          <rect x="360" y="40" width="58" height="40"/><text x="389" y="65">6</text>
+          <rect x="428" y="40" width="58" height="40"/><text x="457" y="65">7</text>
+          <rect x="496" y="40" width="58" height="40"/><text x="525" y="65">8</text>
+          <rect x="564" y="40" width="58" height="40"/><text x="593" y="65">9</text>
+          <rect x="632" y="40" width="58" height="40"/><text x="661" y="65">10</text>
+          <line x1="117" y1="82" x2="300" y2="136" marker-end="url(#gd-m7)"/>
+          <line x1="321" y1="82" x2="340" y2="136" marker-end="url(#gd-m7)"/>
+          <rect x="230" y="140" width="240" height="44" class="g"/><text x="350" y="160">Cloud storage</text><text x="350" y="176" class="sm">receives only blocks 2 and 5</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">The highlighted blocks are the modified ones. Uploading 2 blocks instead of 10 cuts bandwidth by roughly 80% for this edit.</div>
+    </div>
+    <div class="callout info"><div class="callout-title">How does the system know which blocks changed?</div>
+      <p>Each block has a hash. The client (or block server) computes hashes for the new version and compares them with the hashes stored in the metadata DB for the old version. Blocks whose hashes differ are the modified ones.</p>
+    </div>
+    <p>Block servers allow us to save network traffic by providing delta sync and compression.</p>
+  </section>
+
+  <section>
+    <h2 id="high-consistency">High consistency requirement</h2>
+    <p>Our system requires <strong>strong consistency by default</strong>. It is unacceptable for a file to be shown differently by different clients at the same time. Imagine your phone shows version 3 of a contract and your laptop shows version 2: you might sign the wrong one.</p>
+    <p>The system needs to provide strong consistency for the metadata cache and database layers.</p>
+    <p>Memory caches adopt an eventual consistency model by default, meaning different replicas might have different data. To achieve strong consistency, we must ensure:</p>
+    <ul>
+      <li>Data in cache replicas and the master is consistent.</li>
+      <li>Invalidate caches on database write, to ensure cache and database hold the same value.</li>
+    </ul>
+    <div class="diagram"><div class="diagram-title">Invalidate the cache on write</div>
+      <div class="flow">
+        <div class="node sky">API server<small>file v2 saved</small></div>
+        <div class="arrow">→<small>1. write</small></div>
+        <div class="node db yellow">Metadata DB<small>now v2</small></div>
+        <div class="arrow">→<small>2. invalidate</small></div>
+        <div class="node yellow">Metadata cache<small>old v1 removed</small></div>
+      </div>
+      <div class="diagram-caption">After the database is updated, the old cache entry is removed. The next read misses the cache, loads v2 from the DB and caches it. Nobody keeps reading v1.</div>
+    </div>
+    <p>Achieving strong consistency in a <strong>relational database is easy</strong> because it maintains the ACID (Atomicity, Consistency, Isolation, Durability) properties. However, NoSQL databases do not support ACID properties by default; ACID must be programmatically incorporated in synchronization logic. In our design, we choose relational databases because ACID is natively supported.</p>
+  </section>
+
+  <section>
+    <h2 id="metadata-database">Metadata database</h2>
+    <p>The book shows a simplified database schema containing only the most important tables:</p>
+    <div class="diagram"><div class="diagram-title">Metadata database schema</div>
+      <svg class="dg" viewBox="0 0 760 470">
+        <g>
+          <rect x="20" y="20" width="200" height="130" class="a"/>
+          <text x="120" y="42" text-anchor="middle" class="a">user</text>
+          <text x="35" y="68" class="sm">user_id  bigint (PK)</text>
+          <text x="35" y="88" class="sm">user_name  varchar</text>
+          <text x="35" y="108" class="sm">created_at  timestamp</text>
+
+          <rect x="280" y="20" width="200" height="130" class="s"/>
+          <text x="380" y="42" text-anchor="middle" class="s">device</text>
+          <text x="295" y="68" class="sm">device_id  uuid (PK)</text>
+          <text x="295" y="88" class="sm">user_id  bigint (FK)</text>
+          <text x="295" y="108" class="sm">last_logged_in_at  timestamp</text>
+          <text x="295" y="128" class="sm">push_id  varchar</text>
+
+          <rect x="540" y="20" width="200" height="130" class="p"/>
+          <text x="640" y="42" text-anchor="middle" class="p">namespace</text>
+          <text x="555" y="68" class="sm">id  bigint (PK)</text>
+          <text x="555" y="88" class="sm">owner_id  bigint (FK)</text>
+          <text x="555" y="108" class="sm">is_shared  boolean</text>
+          <text x="555" y="128" class="sm">created_at  timestamp</text>
+
+          <rect x="540" y="200" width="200" height="150" class="y"/>
+          <text x="640" y="222" text-anchor="middle" class="y">file</text>
+          <text x="555" y="248" class="sm">id  bigint (PK)</text>
+          <text x="555" y="268" class="sm">file_name  varchar</text>
+          <text x="555" y="288" class="sm">relative_path  varchar</text>
+          <text x="555" y="308" class="sm">is_directory  boolean</text>
+          <text x="555" y="328" class="sm">latest_version  bigint</text>
+          <text x="555" y="344" class="sm">checksum, namespace_id...</text>
+
+          <rect x="280" y="200" width="200" height="150" class="g"/>
+          <text x="380" y="222" text-anchor="middle" class="g">file_version</text>
+          <text x="295" y="248" class="sm">id  bigint (PK)</text>
+          <text x="295" y="268" class="sm">file_id  bigint (FK)</text>
+          <text x="295" y="288" class="sm">device_id  uuid (FK)</text>
+          <text x="295" y="308" class="sm">version_number  bigint</text>
+          <text x="295" y="328" class="sm">last_modified  timestamp</text>
+
+          <rect x="20" y="200" width="200" height="130" class="r"/>
+          <text x="120" y="222" text-anchor="middle" class="r">block</text>
+          <text x="35" y="248" class="sm">block_id  bigint (PK)</text>
+          <text x="35" y="268" class="sm">file_version_id  bigint (FK)</text>
+          <text x="35" y="288" class="sm">block_order  int</text>
+          <text x="35" y="308" class="sm">(hash identifies the block)</text>
+
+          <line x1="222" y1="85" x2="278" y2="85"/>
+          <path d="M120,20 L120,10 L640,10 L640,18"/>
+          <line x1="640" y1="152" x2="640" y2="198"/>
+          <line x1="538" y1="275" x2="482" y2="275"/>
+          <line x1="278" y1="275" x2="222" y2="275"/>
+          <text x="250" y="78" class="sm">1:N</text>
+          <text x="650" y="180" class="sm">1:N</text>
+          <text x="498" y="268" class="sm">1:N</text>
+          <text x="238" y="268" class="sm">1:N</text>
+          <text x="380" y="400" text-anchor="middle" class="sm">user owns devices and namespaces; namespace holds files;</text>
+          <text x="380" y="420" text-anchor="middle" class="sm">file has many versions; each version is an ordered list of blocks</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Simplified schema. Relationships: one user has many devices and namespaces; a namespace contains many files; a file has many file versions; a file version is made of many blocks in a specific order.</div>
+    </div>
+    <dl class="terms">
+      <dt>User</dt><dd>Contains basic information about the user such as username, email, profile photo, etc.</dd>
+      <dt>Device</dt><dd>Stores device info. <code>push_id</code> is used for sending and receiving mobile push notifications. Note a user can have multiple devices.</dd>
+      <dt>Namespace</dt><dd>A namespace is the root directory of a user.</dd>
+      <dt>File</dt><dd>Stores everything related to the latest file.</dd>
+      <dt>File_version</dt><dd>Stores version history of a file. Existing rows are <strong>read-only</strong> to keep the integrity of the file revision history.</dd>
+      <dt>Block</dt><dd>Stores everything related to a file block. A file of any version can be reconstructed by joining all the blocks in the correct order.</dd>
+    </dl>
+    <div class="callout tip"><div class="callout-title">Why read-only versions?</div>
+      <p>If old <code>file_version</code> rows could be edited, the "see revisions" feature couldn't be trusted. A new edit always creates a <em>new</em> version row; the old ones stay exactly as they were.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="upload-flow">Upload flow</h2>
+    <p>Let's discuss what happens when a client uploads a file. Two requests are sent <strong>in parallel</strong>: add file metadata, and upload the file to cloud storage. Both requests originate from client 1. Client 2 is another device of the same user (or a collaborator) that needs to learn about the change.</p>
+    <div class="diagram"><div class="diagram-title">Upload flow (sequence diagram)</div>
+      <svg class="dg" viewBox="0 0 760 520">
+        <defs><marker id="gd-m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="10" y="10" width="90" height="36" class="a"/><text x="55" y="33">Client 1</text>
+          <rect x="120" y="10" width="100" height="36" class="p"/><text x="170" y="33">Block srv</text>
+          <rect x="240" y="10" width="110" height="36" class="g"/><text x="295" y="33">Cloud storage</text>
+          <rect x="370" y="10" width="100" height="36" class="s"/><text x="420" y="33">API servers</text>
+          <rect x="490" y="10" width="100" height="36" class="y"/><text x="540" y="33">Metadata DB</text>
+          <rect x="610" y="10" width="70" height="36" class="s"/><text x="645" y="33">Notif.</text>
+          <rect x="690" y="10" width="64" height="36" class="a"/><text x="722" y="33">Client 2</text>
+          <line x1="55" y1="48" x2="55" y2="510" stroke-dasharray="4 4"/>
+          <line x1="170" y1="48" x2="170" y2="510" stroke-dasharray="4 4"/>
+          <line x1="295" y1="48" x2="295" y2="510" stroke-dasharray="4 4"/>
+          <line x1="420" y1="48" x2="420" y2="510" stroke-dasharray="4 4"/>
+          <line x1="540" y1="48" x2="540" y2="510" stroke-dasharray="4 4"/>
+          <line x1="645" y1="48" x2="645" y2="510" stroke-dasharray="4 4"/>
+          <line x1="722" y1="48" x2="722" y2="510" stroke-dasharray="4 4"/>
+          <text x="380" y="72" class="a">Request A: add file metadata</text>
+          <line x1="55" y1="90" x2="416" y2="90" marker-end="url(#gd-m8)"/><text x="235" y="84" class="sm">1. add metadata</text>
+          <line x1="420" y1="115" x2="536" y2="115" marker-end="url(#gd-m8)"/><text x="480" y="109" class="sm">2. status=pending</text>
+          <line x1="420" y1="140" x2="641" y2="140" marker-end="url(#gd-m8)"/><text x="530" y="134" class="sm">3. notify: uploading</text>
+          <line x1="645" y1="165" x2="718" y2="165" marker-end="url(#gd-m8)"/><text x="683" y="159" class="sm">4</text>
+          <text x="380" y="205" class="p">Request B: upload file content</text>
+          <line x1="55" y1="225" x2="166" y2="225" marker-end="url(#gd-m8)"/><text x="112" y="219" class="sm">1. upload</text>
+          <rect x="125" y="240" width="90" height="34" class="p"/><text x="170" y="256" class="sm">2. chunk, compress,</text><text x="170" y="270" class="sm">encrypt</text>
+          <line x1="170" y1="290" x2="291" y2="290" marker-end="url(#gd-m8)"/><text x="232" y="284" class="sm">3. blocks</text>
+          <line x1="295" y1="320" x2="416" y2="320" marker-end="url(#gd-m8)"/><text x="357" y="314" class="sm">4. callback</text>
+          <line x1="420" y1="350" x2="536" y2="350" marker-end="url(#gd-m8)"/><text x="480" y="344" class="sm">5. status=uploaded</text>
+          <line x1="420" y1="380" x2="641" y2="380" marker-end="url(#gd-m8)"/><text x="530" y="374" class="sm">6. notify: uploaded</text>
+          <line x1="645" y1="405" x2="718" y2="405" marker-end="url(#gd-m8)"/><text x="683" y="399" class="sm">7</text>
+          <text x="380" y="460" class="sm">Requests A and B are sent in parallel from client 1.</text>
+          <text x="380" y="480" class="sm">Client 2 learns about the file twice: "being uploaded", then "done".</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Request A records the file's existence with status "pending" and tells other clients. Request B uploads the bytes through block servers; when cloud storage finishes, a callback flips the status to "uploaded" and other clients are notified again.</div>
+    </div>
+    <h3>Request A: add file metadata</h3>
+    <ol class="steps">
+      <li><strong>Client 1</strong> sends a request to add the metadata of the new file.</li>
+      <li><strong>Store</strong> Store the new file metadata in the metadata DB and change the file upload status to <code>"pending."</code></li>
+      <li><strong>Notify</strong> Notify the notification service that a new file is being added.</li>
+      <li><strong>Fan out</strong> The notification service notifies relevant clients (client 2) that a file is being uploaded.</li>
+    </ol>
+    <h3>Request B: upload file content</h3>
+    <ol class="steps">
+      <li><strong>Upload</strong> Client 1 uploads the content of the file to block servers.</li>
+      <li><strong>Process</strong> Block servers chunk the files into blocks, compress, encrypt the blocks, and upload them to cloud storage.</li>
+      <li><strong>Callback</strong> Once the file is uploaded, cloud storage triggers an upload completion callback. The request is sent to API servers.</li>
+      <li><strong>Update status</strong> File status changes to <code>"uploaded"</code> in the metadata DB.</li>
+      <li><strong>Notify</strong> Notify the notification service that a file status is changed to "uploaded."</li>
+      <li><strong>Fan out</strong> The notification service notifies relevant clients (client 2) that a file is fully uploaded.</li>
+    </ol>
+    <p>When a file is edited, the flow is similar, so the book doesn't repeat it.</p>
+  </section>
+
+  <section>
+    <h2 id="download-flow">Download flow</h2>
+    <p>The download flow is triggered when a file is added or edited elsewhere. How does a client know a file was changed by another client? There are two ways:</p>
+    <ul>
+      <li><strong>If client A is online</strong> while a file is changed by another client, the notification service informs client A that changes are made somewhere so it needs to pull the latest data.</li>
+      <li><strong>If client A is offline</strong> while a file is changed by another client, the data is saved to the cache (the offline backup queue). When the offline client is online again, it pulls the latest changes.</li>
+    </ul>
+    <p>Once a client knows a file is changed, it first requests metadata via API servers, then downloads blocks to construct the file.</p>
+    <div class="diagram"><div class="diagram-title">Download flow (sequence diagram)</div>
+      <svg class="dg" viewBox="0 0 760 420">
+        <defs><marker id="gd-m9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="20" y="10" width="100" height="36" class="a"/><text x="70" y="33">Client 2</text>
+          <rect x="150" y="10" width="110" height="36" class="s"/><text x="205" y="33">Notification</text>
+          <rect x="290" y="10" width="110" height="36" class="s"/><text x="345" y="33">API servers</text>
+          <rect x="430" y="10" width="110" height="36" class="y"/><text x="485" y="33">Metadata DB</text>
+          <rect x="560" y="10" width="90" height="36" class="p"/><text x="605" y="33">Block srv</text>
+          <rect x="665" y="10" width="90" height="36" class="g"/><text x="710" y="33">Cloud</text>
+          <line x1="70" y1="48" x2="70" y2="410" stroke-dasharray="4 4"/>
+          <line x1="205" y1="48" x2="205" y2="410" stroke-dasharray="4 4"/>
+          <line x1="345" y1="48" x2="345" y2="410" stroke-dasharray="4 4"/>
+          <line x1="485" y1="48" x2="485" y2="410" stroke-dasharray="4 4"/>
+          <line x1="605" y1="48" x2="605" y2="410" stroke-dasharray="4 4"/>
+          <line x1="710" y1="48" x2="710" y2="410" stroke-dasharray="4 4"/>
+          <line x1="205" y1="80" x2="74" y2="80" marker-end="url(#gd-m9)"/><text x="138" y="74" class="sm">1. file changed</text>
+          <line x1="70" y1="115" x2="341" y2="115" marker-end="url(#gd-m9)"/><text x="205" y="109" class="sm">2. get metadata</text>
+          <line x1="345" y1="145" x2="481" y2="145" marker-end="url(#gd-m9)"/><text x="413" y="139" class="sm">3. fetch</text>
+          <line x1="485" y1="175" x2="349" y2="175" marker-end="url(#gd-m9)"/><text x="413" y="169" class="sm">4. return</text>
+          <line x1="345" y1="205" x2="74" y2="205" marker-end="url(#gd-m9)"/><text x="205" y="199" class="sm">5. metadata (block list)</text>
+          <line x1="70" y1="240" x2="601" y2="240" marker-end="url(#gd-m9)"/><text x="335" y="234" class="sm">6. download blocks</text>
+          <line x1="605" y1="270" x2="706" y2="270" marker-end="url(#gd-m9)"/><text x="655" y="264" class="sm">7. get</text>
+          <line x1="710" y1="300" x2="609" y2="300" marker-end="url(#gd-m9)"/><text x="655" y="294" class="sm">8. blocks</text>
+          <line x1="605" y1="330" x2="74" y2="330" marker-end="url(#gd-m9)"/><text x="335" y="324" class="sm">9. blocks</text>
+          <rect x="20" y="350" width="140" height="40" class="a"/><text x="90" y="368" class="sm">10. rebuild file</text><text x="90" y="383" class="sm">from blocks</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">The client learns of a change, asks API servers for the new metadata (which blocks, in which order), downloads those blocks via block servers from cloud storage, and reconstructs the file locally.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Notified</strong> The notification service informs client 2 that a file is changed somewhere else.</li>
+      <li><strong>Ask for metadata</strong> Once client 2 knows that new updates are available, it sends a request to fetch metadata.</li>
+      <li><strong>Fetch</strong> API servers call the metadata DB to fetch metadata of the changes.</li>
+      <li><strong>Return to API</strong> Metadata is returned to the API servers.</li>
+      <li><strong>Return to client</strong> Client 2 gets the metadata.</li>
+      <li><strong>Request blocks</strong> Once the client receives the metadata, it sends requests to block servers to download blocks.</li>
+      <li><strong>Block servers fetch</strong> Block servers download blocks from cloud storage.</li>
+      <li><strong>Cloud returns</strong> Cloud storage returns blocks to the block servers.</li>
+      <li><strong>Client receives</strong> Client 2 downloads all the new blocks.</li>
+      <li><strong>Reconstruct</strong> Client 2 reconstructs the file from the blocks in the right order.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="notification-service">Notification service</h2>
+    <p>To maintain file consistency, any mutation of a file performed locally needs to be told to other clients to reduce conflicts. The notification service serves this purpose. At the high level, it allows data to be transferred to clients as events happen. A few options:</p>
+    <div class="cards">
+      <div class="card sky"><h4>Long polling</h4><p>Dropbox uses long polling. The client asks "any changes?" and the server holds the request open until there is a change (or a timeout). Then the client asks again.</p></div>
+      <div class="card purple"><h4>WebSocket</h4><p>WebSocket provides a persistent connection between the client and the server. Communication is bi-directional.</p></div>
+    </div>
+    <div class="diagram"><div class="diagram-title">Long polling vs WebSocket</div>
+      <svg class="dg" viewBox="0 0 720 260">
+        <defs><marker id="gd-m10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <text x="175" y="20" class="s">Long polling</text>
+          <rect x="20" y="30" width="80" height="30" class="a"/><text x="60" y="50">Client</text>
+          <rect x="250" y="30" width="80" height="30" class="s"/><text x="290" y="50">Server</text>
+          <line x1="60" y1="62" x2="60" y2="250" stroke-dasharray="4 4"/>
+          <line x1="290" y1="62" x2="290" y2="250" stroke-dasharray="4 4"/>
+          <line x1="60" y1="85" x2="286" y2="85" marker-end="url(#gd-m10)"/><text x="175" y="79" class="sm">any changes?</text>
+          <text x="175" y="115" class="sm">(server holds request...)</text>
+          <line x1="290" y1="145" x2="64" y2="145" marker-end="url(#gd-m10)"/><text x="175" y="139" class="sm">yes: file A changed</text>
+          <line x1="60" y1="185" x2="286" y2="185" marker-end="url(#gd-m10)"/><text x="175" y="179" class="sm">any changes? (new request)</text>
+          <text x="175" y="220" class="sm">close + reconnect after each reply</text>
+          <text x="545" y="20" class="p">WebSocket</text>
+          <rect x="390" y="30" width="80" height="30" class="a"/><text x="430" y="50">Client</text>
+          <rect x="620" y="30" width="80" height="30" class="s"/><text x="660" y="50">Server</text>
+          <line x1="430" y1="62" x2="430" y2="250" stroke-dasharray="4 4"/>
+          <line x1="660" y1="62" x2="660" y2="250" stroke-dasharray="4 4"/>
+          <line x1="430" y1="85" x2="656" y2="85" marker-end="url(#gd-m10)" marker-start="url(#gd-m10)"/><text x="545" y="79" class="sm">handshake, connection stays open</text>
+          <line x1="660" y1="125" x2="434" y2="125" marker-end="url(#gd-m10)"/><text x="545" y="119" class="sm">server pushes</text>
+          <line x1="430" y1="165" x2="656" y2="165" marker-end="url(#gd-m10)"/><text x="545" y="159" class="sm">client sends</text>
+          <line x1="660" y1="205" x2="434" y2="205" marker-end="url(#gd-m10)"/><text x="545" y="199" class="sm">server pushes</text>
+          <text x="545" y="240" class="sm">two-way, persistent</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Long polling is a series of held-open requests, good for occasional one-way news. WebSocket is a permanent two-way pipe, good for chatty real-time apps.</div>
+    </div>
+    <p>Even though both options work well, the book <strong>opts for long polling</strong> for two reasons:</p>
+    <ol class="steps">
+      <li><strong>Not bi-directional</strong> Communication for the notification service is not bi-directional. The server sends information about file changes to the client, but not vice versa.</li>
+      <li><strong>Infrequent</strong> WebSocket is suited for real-time bi-directional communication such as a chat app. For Google Drive, notifications are sent infrequently with no burst of data.</li>
+    </ol>
+    <p>With long polling, each client establishes a long poll connection to the notification service. If changes to a file are detected, the client closes the long poll connection. Closing the connection means the client must connect to the metadata server to download the latest changes. After a response is received or the connection timeout is reached, the client immediately sends a new request to keep the connection open.</p>
+  </section>
+
+  <section>
+    <h2 id="save-storage-space">Save storage space</h2>
+    <p>To support file version history and ensure reliability, multiple versions of the same file are stored across multiple data centers. Storage space can fill up quickly with frequent backups of all file revisions. Three techniques reduce storage costs:</p>
+    <h3>1. De-duplicate data blocks</h3>
+    <p>Eliminating redundant blocks at the account level is an easy way to save space. Two blocks are identical if they have the <strong>same hash value</strong>.</p>
+    <div class="diagram"><div class="diagram-title">De-duplication by hash</div>
+      <svg class="dg" viewBox="0 0 680 220">
+        <defs><marker id="gd-m11" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <text x="120" y="22" class="sm">report.pdf</text>
+          <rect x="30" y="35" width="56" height="34" class="s"/><text x="58" y="57" class="sm">h=a1f</text>
+          <rect x="92" y="35" width="56" height="34" class="g"/><text x="120" y="57" class="sm">h=7c2</text>
+          <rect x="154" y="35" width="56" height="34" class="s"/><text x="182" y="57" class="sm">h=e90</text>
+          <text x="120" y="122" class="sm">report_copy.pdf</text>
+          <rect x="30" y="135" width="56" height="34" class="s"/><text x="58" y="157" class="sm">h=a1f</text>
+          <rect x="92" y="135" width="56" height="34" class="g"/><text x="120" y="157" class="sm">h=7c2</text>
+          <rect x="154" y="135" width="56" height="34" class="y"/><text x="182" y="157" class="sm">h=b44</text>
+          <rect x="420" y="40" width="240" height="140" class="g"/>
+          <text x="540" y="64">Cloud storage</text>
+          <text x="540" y="92" class="sm">a1f (stored once)</text>
+          <text x="540" y="112" class="sm">7c2 (stored once)</text>
+          <text x="540" y="132" class="sm">e90</text>
+          <text x="540" y="152" class="sm">b44</text>
+          <line x1="212" y1="52" x2="416" y2="90" marker-end="url(#gd-m11)"/>
+          <line x1="212" y1="152" x2="416" y2="130" marker-end="url(#gd-m11)"/>
+          <text x="315" y="205" class="sm">6 blocks referenced, only 4 stored</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">Before storing a block, check whether a block with the same hash already exists for this account. If it does, just point to it instead of storing a second copy.</div>
+    </div>
+    <h3>2. Adopt an intelligent data backup strategy</h3>
+    <ul>
+      <li><strong>Set a limit:</strong> We can set a limit for the number of versions to store. If the limit is reached, the oldest version is replaced with the new version.</li>
+      <li><strong>Keep valuable versions only:</strong> Some files might be edited frequently. For example, saving every edited version of a heavily modified document could mean the file is saved over 1,000 times within a short period. To avoid unnecessary copies, we could limit the number of saved versions, giving more weight to recent versions. Experimentation helps to figure out the optimal number of versions to save.</li>
+    </ul>
+    <h3>3. Moving infrequently used data to cold storage</h3>
+    <p>Cold data is data that has not been active for months or years. Cold storage like <strong>Amazon S3 Glacier</strong> is much cheaper than S3.</p>
+    <div class="diagram"><div class="diagram-title">Hot vs cold storage tiers</div>
+      <div class="flow">
+        <div class="node green">Cloud storage (S3)<small>active files, fast, pricier</small></div>
+        <div class="arrow">→<small>not accessed for months</small></div>
+        <div class="node sky">Cold storage (S3 Glacier)<small>inactive files, slow, much cheaper</small></div>
+      </div>
+      <div class="diagram-caption">Most stored files are rarely opened again. Moving them to cold storage cuts cost while keeping them safe.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="failure-handling">Failure handling</h2>
+    <p>Failures can occur in a large-scale system, and we must adopt design strategies to address them. The book goes through every component:</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Component fails</th><th>How the system recovers</th></tr>
+      <tr><td>Load balancer</td><td>If a load balancer fails, the secondary becomes active and picks up the traffic. Load balancers usually monitor each other using a <strong>heartbeat</strong>, a periodic signal sent between load balancers. A load balancer is considered failed if it has not sent a heartbeat for some time.</td></tr>
+      <tr><td>Block server</td><td>If a block server fails, other servers pick up unfinished or pending jobs.</td></tr>
+      <tr><td>Cloud storage</td><td>S3 buckets are replicated multiple times in different regions. If files are not available in one region, they can be fetched from different regions.</td></tr>
+      <tr><td>API server</td><td>It is a stateless service. If an API server fails, the traffic is redirected to other API servers by a load balancer.</td></tr>
+      <tr><td>Metadata cache</td><td>Metadata cache servers are replicated multiple times. If one node goes down, you can still access other nodes to fetch data. Bring up a new cache server to replace the failed one.</td></tr>
+      <tr><td>Metadata DB</td><td><strong>Master down:</strong> promote one of the slaves to act as a new master and bring up a new slave node. <strong>Slave down:</strong> use another slave for read operations and bring another database server to replace the failed one.</td></tr>
+      <tr><td>Notification service</td><td>Every online user keeps a long poll connection with the notification server, so each notification server is connected with many users. According to the Dropbox talk cited in the book, <strong>over 1 million connections are open per machine</strong>. If a server goes down, all the long poll connections are lost, so clients must reconnect to a different server. Even though one server can keep many open connections, it <strong>cannot reconnect all the lost connections at once</strong>. Reconnecting with all the lost clients is a relatively slow process.</td></tr>
+      <tr><td>Offline backup queue</td><td>Queues are replicated multiple times. If one queue fails, consumers of the queue may need to re-subscribe to the backup queue.</td></tr>
+    </table></div>
+    <div class="diagram"><div class="diagram-title">Load balancer failover via heartbeat</div>
+      <svg class="dg" viewBox="0 0 640 170">
+        <defs><marker id="gd-m12" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <g text-anchor="middle">
+          <rect x="40" y="50" width="170" height="56" class="r"/><text x="125" y="74">Primary LB</text><text x="125" y="92" class="sm">stops sending heartbeat</text>
+          <rect x="430" y="50" width="170" height="56" class="g"/><text x="515" y="74">Secondary LB</text><text x="515" y="92" class="sm">becomes active</text>
+          <line x1="212" y1="68" x2="426" y2="68" stroke-dasharray="5 5" marker-end="url(#gd-m12)"/>
+          <text x="320" y="60" class="sm">heartbeat ... silence</text>
+          <line x1="426" y1="92" x2="212" y2="92" stroke-dasharray="5 5" marker-end="url(#gd-m12)"/>
+          <text x="320" y="112" class="sm">heartbeat</text>
+          <text x="320" y="150" class="sm">no heartbeat for a while = considered failed, secondary takes the traffic</text>
+        </g>
+      </svg>
+      <div class="diagram-caption">The two load balancers check on each other. When the primary goes silent, the secondary takes over.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="step-4-wrap-up">Step 4: Wrap up</h2>
+    <p>The design combines two flows: <strong>managing file metadata</strong> and <strong>file sync</strong>. The notification service is the third important component: it uses long polling to keep clients up to date with file changes. Like any system design question, there is no perfect solution. The book offers two alternatives to discuss:</p>
+    <h3>Alternative 1: upload files directly to cloud storage from the client</h3>
+    <p>Instead of going through block servers, the client could upload straight to cloud storage.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>Pros</h4><ul>
+        <li>Faster file upload, because a file only needs to be transferred once to cloud storage (not client &rarr; block server &rarr; cloud).</li>
+      </ul></div>
+      <div class="cons"><h4>Cons</h4><ul>
+        <li>The same chunking, compression, and encryption logic must be implemented on different platforms (iOS, Android, Web). It is error-prone and requires a lot of engineering effort. In our design, all that logic lives in a centralized place: block servers.</li>
+        <li>A client can easily be hacked or manipulated, so implementing encryption logic on the client side is not ideal.</li>
+      </ul></div>
+    </div>
+    <h3>Alternative 2: move online/offline logic into a separate service</h3>
+    <p>Another interesting evolution is moving presence logic (whether a user is online or offline) out of the notification servers into a separate <strong>presence service</strong>. By doing so, presence service can be easily integrated by other services.</p>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <div class="diagram"><div class="diagram-title">Final architecture</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Client 1<small>laptop</small></div><div class="node accent">Client 2<small>phone</small></div></div>
+        <div class="arch-down">↓<small>HTTPS, authenticated</small></div>
+        <div class="arch-row">
+          <div class="group"><span class="group-label">File content path</span>
+            <div class="node pink">Block servers<small>split 4 MB, delta, compress, encrypt</small></div>
+            <div class="node green">Cloud storage<small>S3, 2+ regions</small></div>
+            <div class="node sky">Cold storage<small>S3 Glacier</small></div>
+          </div>
+          <div class="group"><span class="group-label">Metadata path</span>
+            <div class="node">Load balancer<small>primary + secondary</small></div>
+            <div class="node sky">API servers<small>stateless</small></div>
+            <div class="node yellow">Metadata cache<small>invalidate on write</small></div>
+            <div class="node db yellow">Metadata DB<small>relational, ACID</small></div>
+          </div>
+        </div>
+        <div class="arch-down">↓<small>change events</small></div>
+        <div class="arch-row">
+          <div class="node sky">Notification service<small>long polling</small></div>
+          <div class="node yellow">Offline backup queue<small>for offline clients</small></div>
+        </div>
+      </div>
+      <div class="diagram-caption">Two parallel paths (content and metadata), kept strongly consistent, with a notification layer that keeps every device in sync.</div>
+    </div>
+    <h3>Walkthrough: editing a file on the laptop, seeing it on the phone</h3>
+    <ol class="steps">
+      <li><strong>Edit</strong> Maya edits a 40 MB presentation on her laptop (client 1). The file is 10 blocks of up to 4 MB; her change touches blocks 2 and 5.</li>
+      <li><strong>Metadata first</strong> Client 1 tells the API servers (via the load balancer) about the new version. The API server writes a new <code>file_version</code> row with status "pending", invalidates the cached entry, and tells the notification service. Her phone (client 2), holding a long poll connection, hears "file is being updated."</li>
+      <li><strong>Content in parallel</strong> Client 1 sends the content to block servers, which detect via hashes that only blocks 2 and 5 changed, compress and encrypt those two blocks, and store them in S3 (replicated to another region). Unchanged blocks are de-duplicated: the new version simply references the existing ones.</li>
+      <li><strong>Done</strong> S3's completion callback reaches the API servers, which set status "uploaded" and notify the notification service again.</li>
+      <li><strong>Download on phone</strong> The phone's long poll returns; it asks the API servers for the latest metadata (the ordered list of block hashes), downloads only blocks 2 and 5 through block servers, and rebuilds the file.</li>
+      <li><strong>Offline tablet</strong> Maya's tablet is off. The change waits in the offline backup queue; when the tablet comes online, it pulls the changes.</li>
+      <li><strong>Conflict case</strong> If her colleague edited the same file at the same moment and was processed second, the colleague would get a conflict and see both copies to merge or override.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="interview-guide">How to answer this in an interview</h2>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">Understand the problem and scope</div><div class="iv-time">3–10 min</div></div>
+      <ul>
+        <li>Confirm features: upload/download, sync, notifications, revisions, sharing. Exclude collaborative editing.</li>
+        <li>Confirm mobile + web, any file type, encryption, 10 GB limit, 10M DAU.</li>
+        <li>State non-functionals: reliability (no data loss), fast sync, low bandwidth, scalability, availability.</li>
+        <li>Estimate: 500 PB total, ~240 upload QPS, 480 peak.</li>
+      </ul>
+      <div class="say">"With 50 million signed-up users at 10 GB each, we need to allocate around 500 petabytes. 10 million DAU uploading 2 files a day is about 240 uploads per second, 480 at peak. QPS is modest; the hard parts are durable storage at petabyte scale, bandwidth-efficient sync, and never losing or mixing up a file."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">High-level design</div><div class="iv-time">10–15 min</div></div>
+      <ul>
+        <li>Start with one server (web server, MySQL, drive/ with namespaces). Define upload (simple vs resumable), download, and list_revisions APIs.</li>
+        <li>Evolve: storage fills, so shard by user_id, then move to S3 with cross-region replication; add LB, more web servers, separate metadata DB.</li>
+        <li>Sync conflicts: first processed wins; later one gets a conflict with both copies.</li>
+        <li>Draw the high-level design: block servers, cloud/cold storage, LB, API servers, metadata DB + cache, notification service, offline backup queue.</li>
+      </ul>
+      <div class="say">"I'll start from a single server and evolve it. When storage runs out, sharding by user_id helps, but durability is still a concern, so I'd store files in S3 with replication across two regions and move metadata to its own replicated, sharded database."</div>
+      <div class="say them">"Two people edit the same file at the same time. What happens?"</div>
+      <div class="say">"The first version processed wins. The later one gets a conflict. We show that user both their local copy and the server's latest version, and they choose to merge or override. Nothing is silently discarded."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Deep dive</div><div class="iv-time">10–25 min</div></div>
+      <ul>
+        <li>Block servers: 4 MB blocks with hashes, delta sync, compression, encryption.</li>
+        <li>Strong consistency: relational DB (ACID), cache invalidation on write.</li>
+        <li>Schema: user, device (push_id), namespace, file, file_version (read-only), block.</li>
+        <li>Upload flow (two parallel requests, pending then uploaded) and download flow.</li>
+        <li>Notification: long polling over WebSocket. Storage savings. Failure handling.</li>
+      </ul>
+      <div class="say">"Block servers split files into blocks of up to 4 MB like Dropbox, each identified by a hash. On edit, we compare hashes and upload only changed blocks, which is delta sync. Each block is compressed and encrypted before going to cloud storage."</div>
+      <div class="say them">"Why a relational database instead of NoSQL?"</div>
+      <div class="say">"We need strong consistency: two devices must never show different versions of a file. Relational databases support ACID natively, while with most NoSQL stores we'd have to build those guarantees into our sync logic ourselves."</div>
+      <div class="say them">"Why long polling and not WebSocket?"</div>
+      <div class="say">"Notification traffic is one-way, server to client, and infrequent, with no bursts. WebSocket shines for real-time two-way traffic like chat. Long polling is simpler and enough here, and it's what Dropbox uses."</div>
+      <div class="say them">"Storage costs are exploding. Ideas?"</div>
+      <div class="say">"Three: de-duplicate blocks with the same hash at the account level; limit the number of stored versions and keep only valuable ones, weighted to recent edits; and move data untouched for months to cold storage like S3 Glacier, which is much cheaper."</div>
+      <div class="say them">"A notification server dies. What's the impact?"</div>
+      <div class="say">"All its long poll connections drop, potentially over a million. Clients reconnect to other servers, but a server can't re-accept all of them at once, so recovery is relatively slow. Meanwhile clients can still sync once reconnected, and missed changes are not lost."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up</div><div class="iv-time">3–5 min</div></div>
+      <ul>
+        <li>Summarize: metadata flow, file sync flow, notification service.</li>
+        <li>Alternatives: direct-to-cloud uploads (faster but logic duplicated per platform; client-side encryption risky) and a separate presence service.</li>
+      </ul>
+      <div class="say them">"Why not let clients upload straight to S3?"</div>
+      <div class="say">"It's faster since the file is transferred once. But chunking, compression and encryption would need to be built for iOS, Android and web separately, which is error-prone, and clients can be hacked, so putting encryption on the client is risky. Block servers keep that logic in one trusted place."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Uploading the whole file on every change</div>
+      <p>Without blocks and delta sync, a one-line edit to a 1 GB file re-sends 1 GB. Split into blocks and sync only the changed ones.</p>
+    </div>
+    <div class="callout danger"><div class="callout-title">Choosing eventual consistency for metadata</div>
+      <p>Different devices showing different versions of the same file breaks trust. Use strong consistency: relational DB with ACID, invalidate cache on write.</p>
+    </div>
+    <div class="callout danger"><div class="callout-title">Storing files in one region or one server</div>
+      <p>"Data loss is unacceptable." Replicate files across regions (S3 cross-region replication).</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Silently overwriting on conflicts</div>
+      <p>Last-writer-wins without telling anyone loses work. The book's approach: first processed wins, the later one gets a conflict and sees both copies.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Defaulting to WebSocket for notifications</div>
+      <p>WebSocket isn't wrong, but you should justify the choice. Here traffic is one-way and infrequent, so long polling fits.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Forgetting offline devices</div>
+      <p>If a device is off when a change happens, the change must be kept (offline backup queue) and synced when it reconnects.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Mixing up metadata and file content</div>
+      <p>The metadata DB stores only metadata. File bytes live in cloud storage. Keep the two paths separate.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>How is the 500 PB total storage figure calculated?</summary><div><p>50 million signed-up users &times; 10 GB free space each = 500 PB. It uses all signed-up users (not just DAU) because every account is allocated space.</p></div></details>
+      <details><summary>What is the upload QPS and peak QPS, and how do you get them?</summary><div><p>10 million DAU &times; 2 uploads / 24 hours / 3600 seconds &asymp; 240 QPS. Peak is assumed 2&times;, so 480 QPS.</p></div></details>
+      <details><summary>What are the three steps of a resumable upload?</summary><div><p>1) Send the initial request to get the resumable URL. 2) Upload the data and monitor the upload state. 3) If the upload is disturbed, resume it.</p></div></details>
+      <details><summary>What do block servers do with a file, and what is the max block size the book uses?</summary><div><p>They split the file into blocks (max 4 MB, following Dropbox), give each block a hash, compress and encrypt each block, and upload them to cloud storage.</p></div></details>
+      <details><summary>Scenario: a user changes one slide in a 40 MB file split into 10 blocks. How much data is uploaded?</summary><div><p>Only the block(s) containing that slide, thanks to delta sync. Hashes are compared to find changed blocks, so maybe 1 block (up to 4 MB, before compression) instead of 40 MB.</p></div></details>
+      <details><summary>Why does the design use a relational database for metadata?</summary><div><p>The system needs strong consistency. Relational databases natively support ACID properties; NoSQL databases don't by default, so ACID would need to be built into the sync logic.</p></div></details>
+      <details><summary>Why are rows in the file_version table read-only?</summary><div><p>To keep the integrity of the file revision history. A new edit creates a new row; old versions never change, so "see revisions" is trustworthy.</p></div></details>
+      <details><summary>In the upload flow, when does the file status change from "pending" to "uploaded"?</summary><div><p>Request A sets status "pending" when metadata is added. After block servers upload all blocks to cloud storage, cloud storage triggers a completion callback to API servers, which change the status to "uploaded" and notify other clients.</p></div></details>
+      <details><summary>Scenario: a user's tablet is offline when a file changes. How does it eventually get the update?</summary><div><p>The change is stored in the offline backup queue. When the tablet comes back online, it pulls the latest changes: fetch metadata from API servers, then download the needed blocks and rebuild the file.</p></div></details>
+      <details><summary>Why is losing a notification server painful even though clients just reconnect?</summary><div><p>Each server can hold over 1 million long poll connections. When it dies, all of them drop at once, and other servers can't re-accept all those connections at the same time. Reconnecting all lost clients is relatively slow.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li>Scope: upload/download, sync, notifications, revisions, sharing; mobile + web; any file type; encrypted; max 10 GB; 10M DAU. No collaborative editing.</li>
+      <li>Estimates: 500 PB (50M &times; 10 GB); ~240 upload QPS; 480 peak.</li>
+      <li>Evolution: single server (Apache, MySQL, drive/ namespaces) &rarr; shard by user_id &rarr; S3 with cross-region replication &rarr; LB + web servers + separate metadata DB.</li>
+      <li>APIs: upload (simple or resumable: get URL, upload, resume), download (path), list_revisions (path, limit). All authenticated over HTTPS.</li>
+      <li>Conflicts: first processed wins; later one sees both copies and merges or overrides.</li>
+      <li>Block servers: 4 MB blocks with hashes; delta sync; compression (gzip/bzip2 for text); encryption; then cloud storage.</li>
+      <li>Strong consistency: relational DB (ACID), invalidate cache on write.</li>
+      <li>Schema: user, device (push_id), namespace, file, file_version (read-only), block.</li>
+      <li>Upload: two parallel requests: metadata (pending, notify) + content (blocks, callback, uploaded, notify). Download: notify, get metadata, get blocks, rebuild.</li>
+      <li>Notifications: long polling (one-way, infrequent), offline backup queue for offline clients.</li>
+      <li>Save space: de-dupe blocks by hash, limit and choose versions, move cold data to S3 Glacier.</li>
+      <li>Failures: secondary LB via heartbeat; block/API servers replaceable; S3 multi-region; cache + DB replicas; notification reconnects are slow (1M+ connections/server); replicated queues.</li>
+    </ul></div>
+  </section>
+</main>
+<script src="assets/app.js"></script></body></html>

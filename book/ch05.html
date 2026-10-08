@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Chapter 5: Design Consistent Hashing</title><link rel="stylesheet" href="assets/style.css"></head>
+<body data-chapter="5">
+<main>
+  <header class="ch-hero"><div class="ch-kicker">Chapter 5</div><h1>Design Consistent Hashing</h1>
+    <p class="lead">When data is spread over many servers, you need a rule for "which server holds this key?" The simple rule breaks badly whenever a server is added or removed. Consistent hashing is a clever rule that moves only a small fraction of keys when the set of servers changes, and it powers systems like Amazon Dynamo, Cassandra and Discord.</p>
+    <div class="meta"><span class="tag">~30 min read</span><span class="tag">Intermediate</span><span class="tag">Prerequisites: Chapter 1 (sharding, caches), basic idea of a hash function</span></div></header>
+
+  <section>
+    <h2 id="the-big-picture">The big picture</h2>
+    <p>To scale horizontally (add more machines instead of buying a bigger one), we split data across many servers. Each piece of data has a <strong>key</strong>, such as a user ID or a cache key, and we need a fast, deterministic way to decide which server stores it. Every client must reach the same answer without asking a central directory.</p>
+    <p>The obvious approach is "hash the key and take the remainder when divided by the number of servers." It works perfectly as long as the number of servers never changes. But servers crash, and we add servers as traffic grows. When that happens, the obvious approach reshuffles almost every key, which for a cache means a sudden flood of misses, and for a database means moving most of your data over the network.</p>
+    <p>Consistent hashing is the fix. The book quotes the definition from Wikipedia: <em>"Consistent hashing is a special kind of hashing such that when a hash table is re-sized and consistent hashing is used, only k/n keys need to be remapped on average, where k is the number of keys, and n is the number of slots."</em></p>
+
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>Imagine a round table with seats for several waiters, and diners sitting all around it. Rule: each diner is served by the first waiter found walking <em>clockwise</em> from where the diner sits. If a new waiter sits down, he only takes over the diners between himself and the previous waiter; everyone else keeps their waiter. If a waiter leaves, only his diners shift to the next waiter clockwise. Compare that with the "modulo" approach, which is like renumbering every waiter and reassigning every diner whenever anyone joins or leaves.</p>
+    </div>
+
+    <div class="callout key"><div class="callout-title">The one-sentence version</div>
+      <p>Put both servers and keys on the same circle using a hash function; each key belongs to the first server clockwise from it. Adding or removing a server only affects the keys in one neighbouring slice of the circle.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="key-terms">Key terms</h2>
+    <dl class="terms">
+      <dt>Key</dt><dd>The identifier of a piece of data, e.g. <code>user:42</code> or a cache key. We use it to decide where the data lives.</dd>
+      <dt>Hash function</dt><dd>A function that turns any input (a string, a number) into a fixed-size number. The same input always gives the same output, and outputs look randomly spread. Examples: SHA-1, MD5, MurmurHash.</dd>
+      <dt>Hash value</dt><dd>The number a hash function outputs for a given input.</dd>
+      <dt>Modulo (%)</dt><dd>The remainder after division. <code>10 % 4 = 2</code>, because 10 = 2×4 + 2.</dd>
+      <dt>Server pool</dt><dd>The set of servers currently storing data. Its size is often called N.</dd>
+      <dt>Horizontal scaling</dt><dd>Handling more load by adding more machines rather than making one machine bigger.</dd>
+      <dt>Rehashing</dt><dd>Recomputing which server each key belongs to after the number of servers changes.</dd>
+      <dt>Cache miss</dt><dd>When a client looks for data in a cache and it is not there, so it must go to the slower database.</dd>
+      <dt>SHA-1</dt><dd>A hash function whose output is a 160-bit number, i.e. between 0 and 2<sup>160</sup> − 1.</dd>
+      <dt>Hash space</dt><dd>The full range of possible hash values, from the smallest (0) to the largest (2<sup>160</sup> − 1 for SHA-1).</dd>
+      <dt>Hash ring</dt><dd>The hash space drawn as a circle by joining its two ends, so that after the largest value comes 0 again.</dd>
+      <dt>Partition</dt><dd>The slice of the ring between two adjacent servers. All keys in a server's partition are stored on that server.</dd>
+      <dt>Virtual node (vnode / replica)</dt><dd>One of several positions on the ring that belong to the same real server. A server with 3 virtual nodes appears at 3 places on the ring.</dd>
+      <dt>Standard deviation</dt><dd>A measure of how spread out numbers are. Here: how much each server's share of keys differs from the average share. Smaller means more even.</dd>
+      <dt>Hotspot</dt><dd>A server that gets far more traffic or data than the others and becomes overloaded.</dd>
+      <dt>Binary search</dt><dd>Finding an item in a sorted list by repeatedly halving the search range. Takes about log<sub>2</sub>(n) steps: around 17 steps for 100,000 items.</dd>
+      <dt>Sharding</dt><dd>Splitting a large dataset across multiple servers (shards), each holding part of the data.</dd>
+    </dl>
+  </section>
+
+  <section>
+    <h2 id="rehashing-problem">The rehashing problem</h2>
+    <p>If you have <em>n</em> cache servers, a common way to balance the load is:</p>
+<pre><code>serverIndex = hash(key) % N      # N = size of the server pool</code></pre>
+    <h3>Worked example: 4 servers</h3>
+    <p>Suppose we have 4 servers (indexes 0–3) and 8 keys with these hash values. To fetch the server where a key is stored, we perform <code>hash % 4</code>. For example, 18358617 % 4 = 1, so key0 lives on server 1.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Key</th><th>Hash</th><th>hash % 4 (4 servers)</th></tr>
+      <tr><td>key0</td><td>18358617</td><td>1</td></tr>
+      <tr><td>key1</td><td>26143584</td><td>0</td></tr>
+      <tr><td>key2</td><td>18131146</td><td>2</td></tr>
+      <tr><td>key3</td><td>35863496</td><td>0</td></tr>
+      <tr><td>key4</td><td>34085809</td><td>1</td></tr>
+      <tr><td>key5</td><td>27581703</td><td>3</td></tr>
+      <tr><td>key6</td><td>38164978</td><td>2</td></tr>
+      <tr><td>key7</td><td>22530351</td><td>3</td></tr>
+    </table></div>
+    <div class="diagram"><div class="diagram-title">Keys spread over 4 servers with hash % 4</div>
+      <div class="flow">
+        <div class="node accent">Server 0<small>key1, key3</small></div>
+        <div class="node green">Server 1<small>key0, key4</small></div>
+        <div class="node yellow">Server 2<small>key2, key6</small></div>
+        <div class="node pink">Server 3<small>key5, key7</small></div>
+      </div>
+      <div class="diagram-caption">Nicely balanced: 2 keys per server. This works well while the pool size stays fixed.</div>
+    </div>
+    <h3>Now server 1 goes offline</h3>
+    <p>The pool size becomes 3. Using the same formula, we now compute <code>hash % 3</code>. Even though the hash values do not change, the server index for most keys does, because the divisor changed.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Key</th><th>Hash</th><th>Before: hash % 4</th><th>After: hash % 3</th><th>Moved?</th></tr>
+      <tr><td>key0</td><td>18358617</td><td>1</td><td>0</td><td><strong>Yes</strong></td></tr>
+      <tr><td>key1</td><td>26143584</td><td>0</td><td>0</td><td>No</td></tr>
+      <tr><td>key2</td><td>18131146</td><td>2</td><td>1</td><td><strong>Yes</strong></td></tr>
+      <tr><td>key3</td><td>35863496</td><td>0</td><td>2</td><td><strong>Yes</strong></td></tr>
+      <tr><td>key4</td><td>34085809</td><td>1</td><td>1</td><td>No</td></tr>
+      <tr><td>key5</td><td>27581703</td><td>3</td><td>0</td><td><strong>Yes</strong></td></tr>
+      <tr><td>key6</td><td>38164978</td><td>2</td><td>1</td><td><strong>Yes</strong></td></tr>
+      <tr><td>key7</td><td>22530351</td><td>3</td><td>0</td><td><strong>Yes</strong></td></tr>
+    </table></div>
+    <div class="diagram"><div class="diagram-title">After removing one server: most keys land somewhere new</div>
+      <div class="flow">
+        <div class="node accent">Server 0<small>key0, key1, key5, key7</small></div>
+        <div class="node green">Server 1<small>key2, key4, key6</small></div>
+        <div class="node yellow">Server 2<small>key3</small></div>
+      </div>
+      <div class="diagram-caption">With 3 servers, the indexes 0–2 refer to the remaining servers. 6 of the 8 keys (75%) changed server, not just the 2 that lived on the server that failed.</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>2 / 8</b><span>keys that had to move (lived on the failed server)</span></div>
+      <div class="stat"><b>6 / 8</b><span>keys that actually moved with hash % N</span></div>
+      <div class="stat"><b>k / n</b><span>keys that move on average with consistent hashing</span></div>
+    </div>
+    <p>Why is this so bad? In a cache cluster, a key that "moved" is not really moved; clients just look on the new server, find nothing, and get a <strong>cache miss</strong>. When most keys move at once, a storm of cache misses hits the database at the same moment. In a storage cluster, the data must physically be copied across the network. Consistent hashing is an effective technique to mitigate this problem.</p>
+  </section>
+
+  <section>
+    <h2 id="hash-ring">Hash space and hash ring</h2>
+    <p>Now that we understand the problem, let us build consistent hashing step by step.</p>
+    <ol class="steps">
+      <li><strong>Pick a hash function.</strong> The book assumes SHA-1. Its output range, the <strong>hash space</strong>, goes from 0 to 2<sup>160</sup> − 1. Call the first value x0 and the last value xn.</li>
+      <li><strong>Draw the hash space as a line</strong> from x0 = 0 to xn = 2<sup>160</sup> − 1.</li>
+      <li><strong>Bend the line into a circle</strong> by connecting both ends. This is the <strong>hash ring</strong>. Moving clockwise past the largest value brings you back to 0.</li>
+    </ol>
+    <div class="diagram"><div class="diagram-title">From hash space to hash ring</div>
+      <svg class="dg" viewBox="0 0 680 252" role="img" aria-label="hash space bent into a ring">
+<defs><marker id="c5m0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<text x="170" y="60" text-anchor="middle">Hash space (a straight line)</text>
+<line x1="30" y1="120" x2="310" y2="120" class="a" style="stroke-width:3"/>
+<circle cx="30" cy="120" r="6" class="fill-a"/><circle cx="310" cy="120" r="6" class="fill-a"/>
+<line x1="100" y1="114" x2="100" y2="126"/><line x1="170" y1="114" x2="170" y2="126"/><line x1="240" y1="114" x2="240" y2="126"/>
+<text x="30" y="150" text-anchor="middle" class="sm">x0 = 0</text>
+<text x="290" y="150" text-anchor="middle" class="sm">xn = 2^160 - 1</text>
+<text x="170" y="180" text-anchor="middle" class="sm">every SHA-1 output lands somewhere on this line</text>
+<line x1="345" y1="120" x2="420" y2="120" marker-end="url(#c5m0)"/>
+<text x="383" y="108" text-anchor="middle" class="sm">join the</text><text x="383" y="140" text-anchor="middle" class="sm">two ends</text>
+<circle cx="545" cy="125" r="85" class="a" style="fill:none;stroke-width:3"/>
+<circle cx="545" cy="40" r="6" class="fill-a"/>
+<text x="545" y="26" text-anchor="middle" class="sm">0 = 2^160 (wraps around)</text>
+<path d="M568.6 60.2 A69 69 0 0 1 613.0 113.0" marker-end="url(#c5m0)"/>
+<text x="545" y="130" text-anchor="middle" class="sm">clockwise</text>
+<text x="545" y="238" text-anchor="middle">Hash ring</text>
+</svg>
+      <div class="diagram-caption">The line of possible hash values is joined end to end. Every point on the circle is one possible hash value.</div>
+    </div>
+    <div class="callout info"><div class="callout-title">How big is 2<sup>160</sup>?</div>
+      <p>About 1.46 × 10<sup>48</sup>. The ring has so many positions that two different servers or keys practically never land on the exact same point. In the diagrams we draw positions as angles (0 to 360 degrees) for readability; the idea is identical.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="servers-and-keys">Hashing servers and keys onto the ring</h2>
+    <h3>Step 1: Place the servers</h3>
+    <p>Using the same hash function f, we map servers onto the ring based on the server IP address or name. For example, <code>f("10.0.0.1")</code> gives one position, <code>f("10.0.0.2")</code> another.</p>
+    <h3>Step 2: Place the keys</h3>
+    <p>Cache keys are hashed with the <em>same</em> function and placed on the same ring. One important difference from the modulo approach: <strong>there is no modular operation</strong>. The hash value <em>is</em> the position.</p>
+    <div class="diagram"><div class="diagram-title">4 servers (circles) and 4 keys (squares) on the ring</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<circle cx="372.2" cy="135.5" r="9" class="fill-a"/>
+<text x="400.4" y="129.3" text-anchor="middle" class="a">s0</text>
+<circle cx="294.5" cy="302.2" r="9" class="fill-g"/>
+<text x="304.7" y="334.4" text-anchor="middle" class="g">s1</text>
+<circle cx="127.8" cy="224.5" r="9" class="fill-y"/>
+<text x="99.6" y="238.7" text-anchor="middle" class="y">s2</text>
+<circle cx="205.5" cy="57.8" r="9" class="fill-p"/>
+<text x="195.3" y="33.6" text-anchor="middle" class="p">s3</text>
+<rect x="289.5" y="52.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="286.3" y="84.4" text-anchor="middle" class="sm">k0</text>
+<rect x="362.8" y="229.9" width="10" height="10" rx="2" class="fill-s"/>
+<text x="346.1" y="228.8" text-anchor="middle" class="sm">k1</text>
+<rect x="190.1" y="292.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="205.2" y="280.1" text-anchor="middle" class="sm">k2</text>
+<rect x="127.19999999999999" y="120.1" width="10" height="10" rx="2" class="fill-s"/>
+<text x="153.9" y="139.2" text-anchor="middle" class="sm">k3</text>
+<text x="455" y="50">4 servers placed on the ring</text>
+<text x="455" y="72" class="sm">position = hash(server IP or name)</text>
+<text x="455" y="108" class="sm">s0 at 70 degrees</text>
+<text x="455" y="126" class="sm">s1 at 160 degrees</text>
+<text x="455" y="144" class="sm">s2 at 250 degrees</text>
+<text x="455" y="162" class="sm">s3 at 340 degrees</text>
+<text x="455" y="198" class="sm">Keys use the same hash function,</text>
+<text x="455" y="216" class="sm">so they land on the same ring.</text>
+</svg>
+      <div class="diagram-caption">Servers s0–s3 and keys k0–k3 are positioned by their hash values. Position 0 is at the top; values increase clockwise.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="server-lookup">Server lookup: go clockwise</h2>
+    <p>To determine which server a key is stored on, we <strong>go clockwise from the key position on the ring until a server is found</strong>. That is the whole rule.</p>
+    <div class="diagram"><div class="diagram-title">Each key walks clockwise to its server</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<defs><marker id="c5m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<path d="M305.1 50.2 A141 141 0 0 1 378.8 122.7" class="a" stroke-dasharray="4 3" marker-end="url(#c5m2)"/>
+<path d="M374.5 246.2 A141 141 0 0 1 307.3 308.8" class="g" stroke-dasharray="4 3" marker-end="url(#c5m2)"/>
+<path d="M183.8 304.5 A141 141 0 0 1 121.2 237.3" class="y" stroke-dasharray="4 3" marker-end="url(#c5m2)"/>
+<path d="M125.5 113.8 A141 141 0 0 1 192.7 51.2" class="p" stroke-dasharray="4 3" marker-end="url(#c5m2)"/>
+<circle cx="372.2" cy="135.5" r="9" class="fill-a"/>
+<text x="400.4" y="129.3" text-anchor="middle" class="a">s0</text>
+<circle cx="294.5" cy="302.2" r="9" class="fill-g"/>
+<text x="304.7" y="334.4" text-anchor="middle" class="g">s1</text>
+<circle cx="127.8" cy="224.5" r="9" class="fill-y"/>
+<text x="99.6" y="238.7" text-anchor="middle" class="y">s2</text>
+<circle cx="205.5" cy="57.8" r="9" class="fill-p"/>
+<text x="195.3" y="33.6" text-anchor="middle" class="p">s3</text>
+<rect x="289.5" y="52.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="286.3" y="84.4" text-anchor="middle" class="sm">k0</text>
+<rect x="362.8" y="229.9" width="10" height="10" rx="2" class="fill-s"/>
+<text x="346.1" y="228.8" text-anchor="middle" class="sm">k1</text>
+<rect x="190.1" y="292.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="205.2" y="280.1" text-anchor="middle" class="sm">k2</text>
+<rect x="127.19999999999999" y="120.1" width="10" height="10" rx="2" class="fill-s"/>
+<text x="153.9" y="139.2" text-anchor="middle" class="sm">k3</text>
+<text x="455" y="50">Walk clockwise to the</text>
+<text x="455" y="72">first server you meet</text>
+<text x="455" y="112" class="a">k0 → s0</text>
+<text x="455" y="134" class="g">k1 → s1</text>
+<text x="455" y="156" class="y">k2 → s2</text>
+<text x="455" y="178" class="p">k3 → s3</text>
+</svg>
+      <div class="diagram-caption">Going clockwise, key0 is stored on server 0, key1 on server 1, key2 on server 2, and key3 on server 3.</div>
+    </div>
+    <h3>Worked numeric example (a tiny ring from 0 to 99)</h3>
+    <p>Pretend the hash space is only 0–99. Servers hash to positions <strong>A = 10, B = 40, C = 70</strong>.</p>
+    <div class="tbl-wrap"><table class="tbl">
+      <tr><th>Key hash</th><th>Walk clockwise...</th><th>Server</th></tr>
+      <tr><td>5</td><td>next server position ≥ 5 is 10</td><td>A</td></tr>
+      <tr><td>25</td><td>next server position ≥ 25 is 40</td><td>B</td></tr>
+      <tr><td>40</td><td>exactly on 40</td><td>B</td></tr>
+      <tr><td>55</td><td>next is 70</td><td>C</td></tr>
+      <tr><td>85</td><td>nothing ≥ 85, so wrap around to the start: 10</td><td>A</td></tr>
+    </table></div>
+    <p>So A owns positions 71–99 and 0–10, B owns 11–40, and C owns 41–70. The wrap-around is why we use a ring rather than a line.</p>
+
+    <h3>Implementation: sorted list + binary search</h3>
+    <p>A computer does not literally "walk" around a circle. It keeps the server positions in a <strong>sorted list</strong> and uses <strong>binary search</strong> to find the first position that is greater than or equal to the key's hash. If there is none, it wraps to the first element.</p>
+<pre><code>import bisect, hashlib
+
+def h(s):                                  # position on the ring
+    return int(hashlib.sha1(s.encode()).hexdigest(), 16)
+
+class ConsistentHashRing:
+    def __init__(self, vnodes=100):
+        self.vnodes = vnodes               # virtual nodes per server
+        self.positions = []                # sorted ring positions
+        self.owner = {}                    # position -&gt; real server
+
+    def add_server(self, server):
+        for i in range(self.vnodes):
+            p = h(f"{server}#{i}")         # e.g. "10.0.0.1#7"
+            bisect.insort(self.positions, p)
+            self.owner[p] = server
+
+    def remove_server(self, server):
+        for i in range(self.vnodes):
+            p = h(f"{server}#{i}")
+            self.positions.remove(p)
+            del self.owner[p]
+
+    def get_server(self, key):
+        p = h(key)
+        i = bisect.bisect_left(self.positions, p)   # first position &gt;= p
+        if i == len(self.positions):                 # past the end?
+            i = 0                                    # wrap around the ring
+        return self.owner[self.positions[i]]</code></pre>
+    <p>Lookup costs O(log V), where V is the total number of virtual nodes. With 10 servers × 200 virtual nodes = 2,000 positions, that is about 11 comparisons per lookup: extremely fast.</p>
+  </section>
+
+  <section>
+    <h2 id="add-server">Adding a server</h2>
+    <p>Using the logic above, adding a new server only requires redistributing a fraction of keys. Suppose server 4 (s4) is added to the ring between k0 and s0.</p>
+    <div class="diagram"><div class="diagram-title">Add s4: only k0 moves</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<defs><marker id="c5m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<path d="M205.5 57.8 A130 130 0 0 1 341.9 88.1" class="r" style="stroke-width:7;opacity:.55"/>
+<path d="M305.1 50.2 A141 141 0 0 1 344.3 75.2" class="r" stroke-dasharray="4 3" marker-end="url(#c5m3)"/>
+<path d="M374.5 246.2 A141 141 0 0 1 307.3 308.8" class="g" stroke-dasharray="4 3" marker-end="url(#c5m3)"/>
+<path d="M183.8 304.5 A141 141 0 0 1 121.2 237.3" class="y" stroke-dasharray="4 3" marker-end="url(#c5m3)"/>
+<path d="M125.5 113.8 A141 141 0 0 1 192.7 51.2" class="p" stroke-dasharray="4 3" marker-end="url(#c5m3)"/>
+<circle cx="372.2" cy="135.5" r="9" class="fill-a"/>
+<text x="400.4" y="129.3" text-anchor="middle" class="a">s0</text>
+<circle cx="294.5" cy="302.2" r="9" class="fill-g"/>
+<text x="304.7" y="334.4" text-anchor="middle" class="g">s1</text>
+<circle cx="127.8" cy="224.5" r="9" class="fill-y"/>
+<text x="99.6" y="238.7" text-anchor="middle" class="y">s2</text>
+<circle cx="205.5" cy="57.8" r="9" class="fill-p"/>
+<text x="195.3" y="33.6" text-anchor="middle" class="p">s3</text>
+<circle cx="341.9" cy="88.1" r="9" class="fill-r"/>
+<text x="363.1" y="70.9" text-anchor="middle" class="r">s4</text>
+<rect x="289.5" y="52.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="286.3" y="84.4" text-anchor="middle" class="sm">k0</text>
+<rect x="362.8" y="229.9" width="10" height="10" rx="2" class="fill-s"/>
+<text x="346.1" y="228.8" text-anchor="middle" class="sm">k1</text>
+<rect x="190.1" y="292.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="205.2" y="280.1" text-anchor="middle" class="sm">k2</text>
+<rect x="127.19999999999999" y="120.1" width="10" height="10" rx="2" class="fill-s"/>
+<text x="153.9" y="139.2" text-anchor="middle" class="sm">k3</text>
+<text x="455" y="50">Add server s4 at 45 degrees</text>
+<text x="455" y="90" class="r">k0 → s4 (moved from s0)</text>
+<text x="455" y="112" class="g">k1 → s1 (unchanged)</text>
+<text x="455" y="134" class="y">k2 → s2 (unchanged)</text>
+<text x="455" y="156" class="p">k3 → s3 (unchanged)</text>
+<text x="455" y="196" class="sm">Only keys between s3 and s4</text>
+<text x="455" y="214" class="sm">(red arc) are redistributed.</text>
+</svg>
+      <div class="diagram-caption">After s4 is added, only key0 needs to be redistributed. k1, k2 and k3 remain on the same servers.</div>
+    </div>
+    <p>Before s4 was added, key0 was stored on s0. Now key0 is stored on s4, because s4 is the first server it meets going clockwise from key0's position. The other keys are not redistributed. Compare that to the modulo approach, where adding a fifth server would change <code>hash % 4</code> to <code>hash % 5</code> and move most keys.</p>
+  </section>
+
+  <section>
+    <h2 id="remove-server">Removing a server</h2>
+    <p>When a server is removed, only a small fraction of keys need redistribution. Suppose s1 is removed.</p>
+    <div class="diagram"><div class="diagram-title">Remove s1: only k1 moves</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<defs><marker id="c5m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<path d="M372.2 135.5 A130 130 0 0 1 294.5 302.2" class="r" style="stroke-width:7;opacity:.55"/>
+<path d="M305.1 50.2 A141 141 0 0 1 378.8 122.7" class="a" stroke-dasharray="4 3" marker-end="url(#c5m4)"/>
+<path d="M374.5 246.2 A141 141 0 0 1 121.2 237.3" class="y" stroke-dasharray="4 3" marker-end="url(#c5m4)"/>
+<path d="M183.8 304.5 A141 141 0 0 1 121.2 237.3" class="y" stroke-dasharray="4 3" marker-end="url(#c5m4)"/>
+<path d="M125.5 113.8 A141 141 0 0 1 192.7 51.2" class="p" stroke-dasharray="4 3" marker-end="url(#c5m4)"/>
+<circle cx="372.2" cy="135.5" r="9" class="fill-a"/>
+<text x="400.4" y="129.3" text-anchor="middle" class="a">s0</text>
+<circle cx="294.5" cy="302.2" r="9" class="r" stroke-dasharray="3 2"/>
+<line x1="288.5" y1="296.2" x2="300.5" y2="308.2" class="r"/><line x1="288.5" y1="308.2" x2="300.5" y2="296.2" class="r"/>
+<text x="304.7" y="334.4" text-anchor="middle" class="r">s1</text>
+<circle cx="127.8" cy="224.5" r="9" class="fill-y"/>
+<text x="99.6" y="238.7" text-anchor="middle" class="y">s2</text>
+<circle cx="205.5" cy="57.8" r="9" class="fill-p"/>
+<text x="195.3" y="33.6" text-anchor="middle" class="p">s3</text>
+<rect x="289.5" y="52.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="286.3" y="84.4" text-anchor="middle" class="sm">k0</text>
+<rect x="362.8" y="229.9" width="10" height="10" rx="2" class="fill-s"/>
+<text x="346.1" y="228.8" text-anchor="middle" class="sm">k1</text>
+<rect x="190.1" y="292.8" width="10" height="10" rx="2" class="fill-s"/>
+<text x="205.2" y="280.1" text-anchor="middle" class="sm">k2</text>
+<rect x="127.19999999999999" y="120.1" width="10" height="10" rx="2" class="fill-s"/>
+<text x="153.9" y="139.2" text-anchor="middle" class="sm">k3</text>
+<text x="455" y="50">Remove server s1</text>
+<text x="455" y="90" class="a">k0 → s0 (unchanged)</text>
+<text x="455" y="112" class="y">k1 → s2 (moved from s1)</text>
+<text x="455" y="134" class="y">k2 → s2 (unchanged)</text>
+<text x="455" y="156" class="p">k3 → s3 (unchanged)</text>
+<text x="455" y="196" class="sm">Only keys between s0 and s1</text>
+<text x="455" y="214" class="sm">(red arc) move, to s2.</text>
+</svg>
+      <div class="diagram-caption">When s1 is removed, only key1 must be remapped, to s2. The rest of the keys are unaffected.</div>
+    </div>
+    <p>k1 used to walk clockwise and hit s1 first. With s1 gone, it keeps walking and reaches s2. Keys that belonged to s0, s2 and s3 never noticed anything happened.</p>
+    <div class="callout tip"><div class="callout-title">Remember the direction</div>
+      <p>Keys always move to the <strong>clockwise neighbour</strong> of a removed server. When a server is added, it takes keys from its <strong>clockwise neighbour</strong> (the server that used to own them).</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="two-issues">Two issues in the basic approach</h2>
+    <p>The consistent hashing algorithm was introduced by Karger et al. at MIT. The basic steps are:</p>
+    <ul>
+      <li>Map servers and keys onto the ring using a uniformly distributed hash function.</li>
+      <li>To find out which server a key is mapped to, go clockwise from the key position until the first server on the ring is found.</li>
+    </ul>
+    <p>Two problems are identified with this approach.</p>
+
+    <h3>Issue 1: Partition sizes can be very uneven</h3>
+    <p>It is impossible to keep the same size of partitions on the ring for all servers once servers can be added or removed. A <strong>partition</strong> is the hash space between adjacent servers. In the example below, after s1 is removed, s2's partition is twice as large as the partitions of s0 and s3.</p>
+    <div class="diagram"><div class="diagram-title">Uneven partitions after removing s1</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<path d="M205.5 57.8 A130 130 0 0 1 372.2 135.5" class="a" style="stroke-width:7;opacity:.55"/>
+<path d="M372.2 135.5 A130 130 0 0 1 127.8 224.5" class="y" style="stroke-width:7;opacity:.55"/>
+<path d="M127.8 224.5 A130 130 0 0 1 205.5 57.8" class="p" style="stroke-width:7;opacity:.55"/>
+<circle cx="372.2" cy="135.5" r="9" class="fill-a"/>
+<text x="400.4" y="129.3" text-anchor="middle" class="a">s0</text>
+<circle cx="294.5" cy="302.2" r="9" class="r" stroke-dasharray="3 2"/>
+<line x1="288.5" y1="296.2" x2="300.5" y2="308.2" class="r"/><line x1="288.5" y1="308.2" x2="300.5" y2="296.2" class="r"/>
+<text x="304.7" y="334.4" text-anchor="middle" class="r">s1</text>
+<circle cx="127.8" cy="224.5" r="9" class="fill-y"/>
+<text x="99.6" y="238.7" text-anchor="middle" class="y">s2</text>
+<circle cx="205.5" cy="57.8" r="9" class="fill-p"/>
+<text x="195.3" y="33.6" text-anchor="middle" class="p">s3</text>
+<text x="455" y="50">After s1 is removed:</text>
+<text x="455" y="90" class="a">s0 owns 90 degrees (25%)</text>
+<text x="455" y="112" class="y">s2 owns 180 degrees (50%)</text>
+<text x="455" y="134" class="p">s3 owns 90 degrees (25%)</text>
+<text x="455" y="174" class="sm">s2 now holds twice as much</text>
+<text x="455" y="192" class="sm">of the ring as the others.</text>
+</svg>
+      <div class="diagram-caption">Each coloured arc is the slice of the ring a server owns. s2 inherited s1's slice and now owns half of the ring.</div>
+    </div>
+    <p>Half of all keys going to one of three servers means that server needs about twice the memory and handles about twice the traffic of the others.</p>
+
+    <h3>Issue 2: Keys can be non-uniformly distributed</h3>
+    <p>Even without removals, servers hashed to random positions can end up bunched together. In the example below, s0, s1 and s3 sit close together, so most keys are stored on s2, while s1 and s3 have no data.</p>
+    <div class="diagram"><div class="diagram-title">Non-uniform key distribution</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<path d="M362.6 115.0 A130 130 0 1 1 137.4 115.0" class="y" style="stroke-width:7;opacity:.55"/>
+<circle cx="250.0" cy="50.0" r="9" class="fill-p"/>
+<text x="250.0" y="24.0" text-anchor="middle" class="p">s3</text>
+<circle cx="315.0" cy="67.4" r="9" class="fill-a"/>
+<text x="330.0" y="45.4" text-anchor="middle" class="a">s0</text>
+<circle cx="362.6" cy="115.0" r="9" class="fill-g"/>
+<text x="388.6" y="104.0" text-anchor="middle" class="g">s1</text>
+<circle cx="137.4" cy="115.0" r="9" class="fill-y"/>
+<text x="111.4" y="104.0" text-anchor="middle" class="y">s2</text>
+<rect x="278.6" y="49.4" width="10" height="10" rx="2" class="fill-a"/>
+<text x="277.4" y="81.6" text-anchor="middle" class="sm">k0</text>
+<rect x="374.5" y="186.3" width="10" height="10" rx="2" class="fill-y"/>
+<text x="355.6" y="193.2" text-anchor="middle" class="sm">k1</text>
+<rect x="336.9" y="266.9" width="10" height="10" rx="2" class="fill-y"/>
+<text x="325.0" y="259.0" text-anchor="middle" class="sm">k2</text>
+<rect x="256.3" y="304.5" width="10" height="10" rx="2" class="fill-y"/>
+<text x="259.2" y="289.6" text-anchor="middle" class="sm">k3</text>
+<rect x="170.4" y="281.5" width="10" height="10" rx="2" class="fill-y"/>
+<text x="189.2" y="270.8" text-anchor="middle" class="sm">k4</text>
+<rect x="119.4" y="208.6" width="10" height="10" rx="2" class="fill-y"/>
+<text x="147.6" y="211.4" text-anchor="middle" class="sm">k5</text>
+<text x="455" y="50">Servers bunched together</text>
+<text x="455" y="90" class="y">s2 partition: 60 to 300 degrees</text>
+<text x="455" y="112" class="y">s2 stores k1, k2, k3, k4, k5</text>
+<text x="455" y="134" class="a">s0 stores only k0</text>
+<text x="455" y="156" class="g">s1 stores nothing</text>
+<text x="455" y="178" class="p">s3 stores nothing</text>
+<text x="455" y="218" class="sm">A few servers do almost all</text>
+<text x="455" y="236" class="sm">the work: a hotspot.</text>
+</svg>
+      <div class="diagram-caption">With only four random positions, there is a real chance of large gaps. The server at the end of the largest gap becomes a hotspot.</div>
+    </div>
+    <p>A technique called <strong>virtual nodes</strong> (or replicas) is used to solve both problems.</p>
+  </section>
+
+  <section>
+    <h2 id="virtual-nodes">Virtual nodes</h2>
+    <p>A virtual node refers to a real node, and <strong>each server is represented by multiple virtual nodes on the ring</strong>. Instead of hashing "server 0" once, we hash "s0_0", "s0_1", "s0_2", ... and place every result on the ring. All of those points belong to the same physical machine.</p>
+    <div class="analogy"><div class="callout-title">Real-world analogy</div>
+      <p>If you drop 4 coins on a long track at random, the gaps between them will be very uneven. If you drop 400 coins, the gaps will be small and fairly regular. Give each server many coins (virtual nodes) and every server ends up with roughly the same total length of track.</p>
+    </div>
+    <h3>How it works</h3>
+    <p>In the book's example, both server 0 and server 1 have 3 virtual nodes. The number 3 is arbitrarily chosen; in real-world systems the number is much larger.</p>
+    <div class="diagram"><div class="diagram-title">Two servers, three virtual nodes each</div>
+      <svg class="dg" viewBox="0 0 680 360" role="img" aria-label="hash ring diagram">
+<defs><marker id="c5m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<circle cx="250" cy="180" r="130" style="fill:none"/>
+<path d="M137.4 115.0 A130 130 0 0 1 272.6 52.0" class="a" style="stroke-width:7;opacity:.55"/>
+<path d="M272.6 52.0 A130 130 0 0 1 356.5 105.4" class="g" style="stroke-width:7;opacity:.55"/>
+<path d="M356.5 105.4 A130 130 0 0 1 362.6 245.0" class="a" style="stroke-width:7;opacity:.55"/>
+<path d="M362.6 245.0 A130 130 0 0 1 261.3 309.5" class="g" style="stroke-width:7;opacity:.55"/>
+<path d="M261.3 309.5 A130 130 0 0 1 143.5 254.6" class="a" style="stroke-width:7;opacity:.55"/>
+<path d="M143.5 254.6 A130 130 0 0 1 137.4 115.0" class="g" style="stroke-width:7;opacity:.55"/>
+<path d="M314.0 305.6 A141 141 0 0 1 269.6 319.6" class="g" stroke-dasharray="4 3" marker-end="url(#c5m7)"/>
+<circle cx="272.6" cy="52.0" r="9" class="fill-a"/>
+<text x="278.5" y="22.5" text-anchor="middle" class="a">s0_0</text>
+<circle cx="356.5" cy="105.4" r="9" class="fill-g"/>
+<text x="384.3" y="89.9" text-anchor="middle" class="g">s1_0</text>
+<circle cx="362.6" cy="245.0" r="9" class="fill-a"/>
+<text x="392.0" y="266.0" text-anchor="middle" class="a">s0_1</text>
+<circle cx="261.3" cy="309.5" r="9" class="fill-g"/>
+<text x="264.3" y="347.4" text-anchor="middle" class="g">s1_1</text>
+<circle cx="143.5" cy="254.6" r="9" class="fill-a"/>
+<text x="115.7" y="278.1" text-anchor="middle" class="a">s0_2</text>
+<circle cx="137.4" cy="115.0" r="9" class="fill-g"/>
+<text x="108.0" y="102.0" text-anchor="middle" class="g">s1_2</text>
+<rect x="310.0" y="287.6" width="10" height="10" rx="2" class="fill-s"/>
+<text x="303.0" y="275.8" text-anchor="middle" class="sm">k0</text>
+<text x="455" y="50">2 real servers, 3 virtual</text>
+<text x="455" y="72">nodes each</text>
+<text x="455" y="112" class="a">s0 = s0_0, s0_1, s0_2</text>
+<text x="455" y="134" class="g">s1 = s1_0, s1_1, s1_2</text>
+<text x="455" y="174" class="sm">Each coloured arc is owned by</text>
+<text x="455" y="192" class="sm">the virtual node at its end.</text>
+<text x="455" y="228" class="g">k0 → s1_1 → stored on s1</text>
+</svg>
+      <div class="diagram-caption">Instead of s0 owning one big partition, it owns three smaller ones (blue arcs), interleaved with s1's three (green arcs). Each server is responsible for many partitions.</div>
+    </div>
+    <ol class="steps">
+      <li><strong>Create virtual nodes.</strong> s0_0, s0_1, s0_2 represent server 0; s1_0, s1_1, s1_2 represent server 1.</li>
+      <li><strong>Hash each virtual node onto the ring.</strong> They scatter around the circle.</li>
+      <li><strong>Look up keys exactly as before.</strong> Go clockwise from the key to the first virtual node. In the diagram, k0 finds virtual node s1_1 first.</li>
+      <li><strong>Map virtual node to real server.</strong> s1_1 belongs to server 1, so k0 is stored on server 1.</li>
+    </ol>
+
+    <h3>How many virtual nodes?</h3>
+    <p>As the number of virtual nodes increases, the distribution of keys becomes more balanced, because the <strong>standard deviation</strong> (how far each server's load is from the average) gets smaller. The book cites an experiment:</p>
+    <div class="stats">
+      <div class="stat"><b>~10%</b><span>std. deviation of the mean with 100 virtual nodes</span></div>
+      <div class="stat"><b>~5%</b><span>std. deviation of the mean with 200 virtual nodes</span></div>
+      <div class="stat"><b>↑ vnodes</b><span>more balance, more metadata</span></div>
+    </div>
+    <p>In plain terms: with 200 virtual nodes per server, a typical server holds within about 5% of the average amount of data. If the average is 1,000,000 keys per server, most servers hold roughly 950,000 to 1,050,000 keys.</p>
+    <div class="pros-cons">
+      <div class="pros"><h4>More virtual nodes</h4><ul><li>More balanced data distribution.</li><li>When a server leaves, its load spreads over many servers instead of dumping onto one neighbour.</li><li>Lets you give a powerful server more vnodes than a weaker one (weighted capacity).</li></ul></div>
+      <div class="cons"><h4>The cost</h4><ul><li>More space is needed to store data about virtual nodes (the sorted list of positions grows).</li><li>Slightly more work when adding or removing servers.</li></ul></div>
+    </div>
+    <p>This is a tradeoff, and we can tune the number of virtual nodes to fit our system requirements.</p>
+    <div class="callout key"><div class="callout-title">Why virtual nodes fix both issues</div>
+      <p>Uneven partitions: each server's total share is the sum of many small random slices, which averages out. Removing a server: its many slices each go to a <em>different</em> clockwise neighbour, so the load is shared among all remaining servers instead of doubling one.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="affected-keys">Finding affected keys</h2>
+    <p>When a server is added or removed, a fraction of data needs to be redistributed. How do we find exactly which range of keys to move?</p>
+    <div class="diagram"><div class="diagram-title">The affected range when adding or removing a server</div>
+      <svg class="dg" viewBox="0 0 680 330" role="img" aria-label="affected key ranges">
+<circle cx="170" cy="150" r="95" style="fill:none"/>
+<path d="M137.5 60.7 A95 95 0 0 1 237.2 82.8" class="r" style="stroke-width:7;opacity:.55"/>
+<circle cx="259.3" cy="117.5" r="9" class="fill-a"/>
+<text x="281.8" y="113.3" text-anchor="middle" class="a">s0</text>
+<circle cx="202.5" cy="239.3" r="9" class="fill-g"/>
+<text x="210.7" y="265.8" text-anchor="middle" class="g">s1</text>
+<circle cx="80.7" cy="182.5" r="9" class="fill-y"/>
+<text x="58.2" y="194.7" text-anchor="middle" class="y">s2</text>
+<circle cx="137.5" cy="60.7" r="9" class="fill-p"/>
+<text x="129.3" y="42.2" text-anchor="middle" class="p">s3</text>
+<circle cx="237.2" cy="82.8" r="9" class="fill-r"/>
+<text x="254.1" y="69.9" text-anchor="middle" class="r">s4</text>
+<circle cx="510" cy="150" r="95" style="fill:none"/>
+<path d="M599.3 117.5 A95 95 0 0 1 542.5 239.3" class="r" style="stroke-width:7;opacity:.55"/>
+<circle cx="599.3" cy="117.5" r="9" class="fill-a"/>
+<text x="621.8" y="113.3" text-anchor="middle" class="a">s0</text>
+<circle cx="542.5" cy="239.3" r="9" class="r" stroke-dasharray="3 2"/>
+<line x1="536.5" y1="233.3" x2="548.5" y2="245.3" class="r"/><line x1="536.5" y1="245.3" x2="548.5" y2="233.3" class="r"/>
+<text x="550.7" y="265.8" text-anchor="middle" class="r">s1</text>
+<circle cx="420.7" cy="182.5" r="9" class="fill-y"/>
+<text x="398.2" y="194.7" text-anchor="middle" class="y">s2</text>
+<circle cx="477.5" cy="60.7" r="9" class="fill-p"/>
+<text x="469.3" y="42.2" text-anchor="middle" class="p">s3</text>
+<text x="170" y="290" text-anchor="middle">Adding s4</text>
+<text x="170" y="310" text-anchor="middle" class="sm">affected: s3 → s4 (move to s4)</text>
+<text x="510" y="290" text-anchor="middle">Removing s1</text>
+<text x="510" y="310" text-anchor="middle" class="sm">affected: s0 → s1 (move to s2)</text>
+</svg>
+      <div class="diagram-caption">Left: s4 is added; the red arc between s3 and s4 is the affected range. Right: s1 is removed; the red arc between s0 and s1 is the affected range.</div>
+    </div>
+    <div class="cards">
+      <div class="card green"><h4>Adding a server (s4)</h4><p>The affected range starts from s4 (the newly added node) and moves <strong>anticlockwise</strong> around the ring until a server is found (s3). Keys located between s3 and s4 need to be redistributed to s4.</p></div>
+      <div class="card red"><h4>Removing a server (s1)</h4><p>The affected range starts from s1 (the removed node) and moves <strong>anticlockwise</strong> around the ring until a server is found (s0). Keys located between s0 and s1 must be redistributed to s2.</p></div>
+    </div>
+    <p>In code terms: for a new node at position p, find its predecessor position q in the sorted list. All keys with hash in (q, p] move from p's clockwise successor to the new node. With virtual nodes, repeat this for every virtual node of the new server; each one steals a small range from a different neighbour.</p>
+  </section>
+
+  <section>
+    <h2 id="benefits-and-uses">Benefits and real-world uses</h2>
+    <h3>Benefits (from the book's wrap-up)</h3>
+    <ul>
+      <li><strong>Minimized keys are redistributed</strong> when servers are added or removed: about k/n instead of nearly all.</li>
+      <li><strong>It is easy to scale horizontally</strong> because data are more evenly distributed.</li>
+      <li><strong>Mitigate the hotspot key problem.</strong> Excessive access to a specific shard could cause server overload. Imagine data for Katy Perry, Justin Bieber, and Lady Gaga all ending up on the same shard. Consistent hashing helps mitigate the problem by distributing the data more evenly.</li>
+    </ul>
+    <h3>Where it is used</h3>
+    <div class="cards">
+      <div class="card sky"><h4>Amazon Dynamo</h4><p>The partitioning component of Amazon's Dynamo database.</p></div>
+      <div class="card purple"><h4>Apache Cassandra</h4><p>Data partitioning across the cluster.</p></div>
+      <div class="card pink"><h4>Discord</h4><p>The Discord chat application.</p></div>
+      <div class="card yellow"><h4>Akamai</h4><p>Akamai's content delivery network (CDN).</p></div>
+      <div class="card teal"><h4>Maglev</h4><p>Google's Maglev network load balancer.</p></div>
+    </div>
+    <div class="callout info"><div class="callout-title">Where you will see it again</div>
+      <p>Chapter 6 (Design a Key-Value Store) uses consistent hashing to partition and replicate data. Whenever an interviewer asks "how do you shard this?", consistent hashing is a strong default answer.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="putting-it-all-together">Putting it all together</h2>
+    <p>Here is how consistent hashing sits inside a real distributed cache. Clients (or a routing layer) hold a copy of the ring and route every key directly to the right cache server.</p>
+    <div class="diagram"><div class="diagram-title">A distributed cache routed by consistent hashing</div>
+      <div class="arch">
+        <div class="arch-row"><div class="node accent">Web servers<small>need user:42's profile</small></div></div>
+        <div class="arch-down">↓<small>1. h("user:42") → binary search on ring</small></div>
+        <div class="group"><span class="group-label">Ring lookup (in each web server)</span>
+          <div class="node purple">Sorted vnode positions<small>3 servers × 200 vnodes = 600 entries</small></div>
+          <div class="arrow">→</div>
+          <div class="node purple">vnode → server map<small>"s1_57" → cache-B</small></div>
+        </div>
+        <div class="arch-down">↓<small>2. send GET to the owning server</small></div>
+        <div class="arch-row">
+          <div class="node green">Cache A</div>
+          <div class="node green">Cache B<small>owns user:42</small></div>
+          <div class="node green">Cache C</div>
+          <div class="node yellow">Cache D<small>new: takes ~1/4 of keys</small></div>
+        </div>
+        <div class="arch-down">↓<small>3. on miss</small></div>
+        <div class="arch-row"><div class="node db red">Database</div></div>
+      </div>
+      <div class="diagram-caption">The ring is small metadata replicated to every client. Adding Cache D only moves about a quarter of the keys (the slices D's vnodes now own), taken roughly evenly from A, B and C.</div>
+    </div>
+    <h3>Walkthrough</h3>
+    <ol class="steps">
+      <li><strong>Hash the key.</strong> The web server computes <code>h("user:42")</code>, a position on the ring.</li>
+      <li><strong>Binary search.</strong> It finds the first virtual node at or after that position in its sorted list, wrapping to the start if needed. Say it is <code>s1_57</code>.</li>
+      <li><strong>Map to a real server.</strong> <code>s1_57</code> belongs to Cache B, so the request goes to Cache B.</li>
+      <li><strong>Serve.</strong> Cache B returns the profile, or on a miss the web server reads the database and stores the result in Cache B.</li>
+      <li><strong>Scale out.</strong> Ops adds Cache D. Its 200 virtual nodes are inserted into every client's ring. Only keys falling in D's new slices change owner (about 1/4 of keys, since there are now 4 servers), causing a modest, spread-out set of cache misses, instead of most of the cache missing at once as with <code>hash % N</code>.</li>
+      <li><strong>Failure.</strong> If Cache A dies, its 200 slices each fall to their clockwise neighbours, which belong to B, C and D roughly equally, so no single server is overwhelmed.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2 id="interview">How to answer this in an interview</h2>
+    <p>Consistent hashing usually comes up as a building block inside a bigger question ("how do you partition the data?"), or as a direct "explain consistent hashing" question. Either way, this structure works.</p>
+    <div class="iv"><div class="iv-head"><div class="iv-num">1</div><div class="iv-title">State the problem it solves</div><div class="iv-time">2–3 min</div></div>
+      <ul><li>Explain <code>hash(key) % N</code> and show what happens when N changes.</li></ul>
+      <div class="say">"The naive way to shard is hash of the key modulo the number of servers. That's balanced, but if a server dies and N goes from 4 to 3, almost every key maps to a different server. For a cache, that's a flood of misses hitting the database at once."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">2</div><div class="iv-title">Draw the ring</div><div class="iv-time">5 min</div></div>
+      <ul><li>Hash space 0 to 2<sup>160</sup> − 1 (SHA-1) bent into a ring.</li><li>Servers and keys hashed onto it; key goes to first server clockwise.</li><li>Show adding and removing a server.</li></ul>
+      <div class="say">"I hash both servers and keys onto the same ring. A key belongs to the first server clockwise from it. If I add a server, it only takes keys from the slice between it and the previous server. On average only k over n keys move."</div>
+      <div class="say them">"How would you actually implement the clockwise lookup?"</div>
+      <div class="say">"Keep the server positions in a sorted array. Hash the key, binary-search for the first position greater than or equal to it, and wrap to index 0 if I run off the end. That's O(log n) per lookup."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">3</div><div class="iv-title">Point out the flaws and fix them with virtual nodes</div><div class="iv-time">5 min</div></div>
+      <ul><li>Uneven partitions, non-uniform key distribution.</li><li>Virtual nodes: many positions per server; std. dev. ~10% at 100, ~5% at 200; costs metadata.</li></ul>
+      <div class="say">"With few servers, random positions give uneven slices, and when a server leaves, its whole slice lands on one neighbour. So each server gets many virtual nodes, say 100 to 200. With 200 the load per server is within about 5% of the mean. The trade-off is more metadata to store."</div>
+      <div class="say them">"Some of your servers have twice the RAM. How do you use that?"</div>
+      <div class="say">"Give them proportionally more virtual nodes. A server with twice the vnodes owns roughly twice the hash space, so it stores roughly twice the keys."</div>
+      <div class="say them">"What about a single very hot key, like a celebrity's profile?"</div>
+      <div class="say">"Consistent hashing spreads keys evenly, but one key still lives on one server. For a truly hot key I'd add replication of that key or a local cache in front, on top of consistent hashing."</div>
+    </div>
+    <div class="iv"><div class="iv-head"><div class="iv-num">4</div><div class="iv-title">Wrap up with benefits and real uses</div><div class="iv-time">1–2 min</div></div>
+      <div class="say">"So: minimal key movement, easy horizontal scaling, and better protection against hotspots. It's used in Dynamo, Cassandra, Discord, Akamai's CDN and Google's Maglev load balancer."</div>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="common-mistakes">Common mistakes</h2>
+    <div class="callout danger"><div class="callout-title">Applying modulo to the ring position</div>
+      <p>In consistent hashing there is no <code>% N</code>. The hash value is the position on the ring. If you take a modulo by the server count, you are back to the rehashing problem.</p>
+    </div>
+    <div class="callout danger"><div class="callout-title">Forgetting the wrap-around</div>
+      <p>A key whose hash is larger than every server position belongs to the <em>first</em> server on the ring. Missing this in code gives an index-out-of-range bug.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Presenting the basic ring as the final answer</div>
+      <p>Interviewers expect you to spot uneven partitions and non-uniform distribution yourself, then introduce virtual nodes.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Getting the direction wrong</div>
+      <p>Lookups go clockwise. The affected range when adding or removing a node is found by going <strong>anticlockwise</strong> from that node to the previous server.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Claiming virtual nodes are free</div>
+      <p>More vnodes mean more balance but more metadata to store and update. Say it is a tunable trade-off.</p>
+    </div>
+    <div class="callout warn"><div class="callout-title">Thinking consistent hashing solves a single hot key</div>
+      <p>It evens out the distribution of many keys. One extremely popular key still maps to one server and needs extra measures.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="test-yourself">Test yourself</h2>
+    <div class="quiz">
+      <details><summary>1. With hash % N and 4 servers, server 1 goes down. Why do keys on servers 0, 2 and 3 move too?</summary><div><p>Because the divisor changes from 4 to 3, so <code>hash % 3</code> differs from <code>hash % 4</code> for most hash values. The server assignment depends on N, not just on the key. In the book's example, 6 of 8 keys moved even though only 2 lived on the failed server.</p></div></details>
+      <details><summary>2. What is the hash space when using SHA-1, and how does it become a ring?</summary><div><p>0 to 2<sup>160</sup> − 1. Connect the two ends so that after the largest value comes 0 again.</p></div></details>
+      <details><summary>3. On a 0–99 ring, servers are at 15, 50 and 80. Which server stores keys hashing to 20, 80 and 95?</summary><div><p>20 → 50 (first server clockwise). 80 → 80 (it lands exactly on that server). 95 → 15, because nothing is ≥ 95 so we wrap around to the first server.</p></div></details>
+      <details><summary>4. A new server s4 is added between s3 and s0. Which keys move, and where do they come from?</summary><div><p>Only the keys between s3 and s4 (going anticlockwise from s4 until the first server, s3). They move to s4 from s0, which used to own them as their first clockwise server.</p></div></details>
+      <details><summary>5. Server s1 is removed. Which keys move and to where?</summary><div><p>Keys between s0 (anticlockwise neighbour) and s1. They move to s2, the next server clockwise.</p></div></details>
+      <details><summary>6. What are the two problems with the basic consistent hashing approach?</summary><div><p>(1) Partition sizes are uneven, especially after servers are added or removed (e.g. one server ends up owning half the ring). (2) Keys can be non-uniformly distributed, so some servers get most keys and others almost none.</p></div></details>
+      <details><summary>7. How do virtual nodes help, and what does the book say about 100 vs 200 of them?</summary><div><p>Each server appears at many points, so its total share is the sum of many small slices, which averages out. The book notes a standard deviation of about 10% of the mean with 100 virtual nodes and about 5% with 200. The cost is more space for virtual node metadata.</p></div></details>
+      <details><summary>8. You have 5 servers but one has double the CPU and memory. How do you route more data to it?</summary><div><p>Give it about twice as many virtual nodes as the others. It then owns roughly twice the ring and stores roughly twice the keys.</p></div></details>
+      <details><summary>9. Why use binary search in the implementation?</summary><div><p>Ring positions are stored in a sorted list. Finding the first position ≥ the key's hash with binary search takes O(log n) time, e.g. about 11 steps for 2,000 virtual nodes, instead of scanning the whole list.</p></div></details>
+      <details><summary>10. Name three real systems that use consistent hashing.</summary><div><p>Any three of: Amazon Dynamo (partitioning), Apache Cassandra (data partitioning), Discord, Akamai CDN, Google Maglev load balancer.</p></div></details>
+    </div>
+  </section>
+
+  <section>
+    <h2 id="cheat-sheet">Cheat sheet</h2>
+    <div class="cheatsheet"><ul>
+      <li><code>hash(key) % N</code> is balanced but breaks when N changes: most keys remap (6 of 8 in the book's example).</li>
+      <li>Consistent hashing: only about <strong>k/n</strong> keys remap on resize (k keys, n servers).</li>
+      <li>Hash space: SHA-1, 0 to 2<sup>160</sup> − 1, bent into a <strong>hash ring</strong>.</li>
+      <li>Hash servers (by IP/name) and keys with the same function onto the ring. No modulo.</li>
+      <li>Lookup: go <strong>clockwise</strong> from the key to the first server. Implement with sorted list + binary search; wrap to index 0.</li>
+      <li>Add server: it takes the keys between it and its anticlockwise neighbour. Remove server: its keys go to the clockwise neighbour.</li>
+      <li>Problems with basic ring: uneven partition sizes; non-uniform key distribution.</li>
+      <li>Fix: <strong>virtual nodes</strong>, many ring positions per server. Std. dev. ~10% of mean at 100 vnodes, ~5% at 200.</li>
+      <li>Trade-off: more vnodes = better balance but more metadata storage.</li>
+      <li>Benefits: minimal redistribution, easy horizontal scaling, mitigates hotspots.</li>
+      <li>Used by Dynamo, Cassandra, Discord, Akamai CDN, Maglev.</li>
+    </ul></div>
+  </section>
+</main>
+<script src="assets/app.js"></script></body></html>
